@@ -13,14 +13,101 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const PORT = process.env.PORT || 3001;
 const API_KEY = process.env.API_KEY || 'tps_secret_gateway_key_2026';
+const ADMIN_PIN = process.env.ADMIN_PIN || 'tapowan2026';
 const AUTH_FOLDER = path.join(__dirname, 'auth_info');
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || 'https://tapowan-whatsapp-gateway.onrender.com';
+
+const TURSO_URL = process.env.TURSO_DATABASE_URL || 'https://tapowan-im-aatif.aws-ap-northeast-1.turso.io';
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODY1MTcyOTQsImlkIjoiMDE5ZmY0YWUtM2YwMS03YTYwLWI4NTgtMWQ4M2JlYjJkNzJkIiwia2lkIjoiblRLTmdsNnYyaFQ4LTlhT09uQV9JdERDc3BTdk9iejhSYzNuY0hSNUhOVSIsInJpZCI6ImZmMWI4YTE5LWFhZTgtNGM5MS1hNjFhLTlkMTY1NTQ1OTEyOCJ9.a-w2gyEauZrfLwqWAMh2QLqHmqOxIsziDu9WRBrCPmLaoZThvoDlPdW4VjQ6ST5hRYJj1E1R0sJELyNPg4zrBQ';
 
 if (!fs.existsSync(AUTH_FOLDER)) {
   fs.mkdirSync(AUTH_FOLDER, { recursive: true });
 }
 
+// ----------------------------------------------------
+// Turso Cloud Session Backup & Restore Helper
+// ----------------------------------------------------
+async function executeTursoQuery(sql, args = []) {
+  try {
+    const formattedArgs = args.map(arg => {
+      if (typeof arg === 'number') return { type: 'integer', value: String(arg) };
+      if (arg === null || arg === undefined) return { type: 'null' };
+      return { type: 'text', value: String(arg) };
+    });
+
+    const res = await fetch(`${TURSO_URL.replace(/\/$/, '')}/v2/pipeline`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + TURSO_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        requests: [
+          { type: 'execute', stmt: { sql, args: formattedArgs } }
+        ]
+      })
+    });
+    return await res.json();
+  } catch (err) {
+    console.error('Turso session sync error:', err.message);
+    return null;
+  }
+}
+
+async function restoreSessionFromTurso() {
+  try {
+    if (fs.existsSync(path.join(AUTH_FOLDER, 'creds.json'))) {
+      console.log('📦 Local credentials exist, skipping Turso restore.');
+      return;
+    }
+    console.log('🔄 Checking Turso Cloud for saved WhatsApp session...');
+    const result = await executeTursoQuery("SELECT value FROM settings WHERE key = 'baileys_cloud_auth' LIMIT 1");
+    const row = result?.results?.[0]?.response?.result?.rows?.[0];
+    if (row && row[0]?.value) {
+      const filesObj = JSON.parse(row[0].value);
+      for (const [filename, content] of Object.entries(filesObj)) {
+        fs.writeFileSync(path.join(AUTH_FOLDER, filename), content, 'utf8');
+      }
+      console.log(`✅ Restored ${Object.keys(filesObj).length} WhatsApp session files from Turso Cloud!`);
+    } else {
+      console.log('ℹ️ No saved WhatsApp session in Turso Cloud. Ready for QR scan.');
+    }
+  } catch (e) {
+    console.error('Failed restoring session from Turso:', e.message);
+  }
+}
+
+let syncTimeout = null;
+function debouncedSaveSessionToTurso() {
+  if (syncTimeout) clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(async () => {
+    try {
+      if (!fs.existsSync(AUTH_FOLDER)) return;
+      const fileNames = fs.readdirSync(AUTH_FOLDER);
+      if (!fileNames.includes('creds.json')) return;
+
+      const filesObj = {};
+      for (const name of fileNames) {
+        filesObj[name] = fs.readFileSync(path.join(AUTH_FOLDER, name), 'utf8');
+      }
+      const jsonStr = JSON.stringify(filesObj);
+      
+      await executeTursoQuery(
+        "INSERT INTO settings (key, value, category, updatedBy) VALUES ('baileys_cloud_auth', ?, 'system', 'whatsapp_gateway') ON CONFLICT(key) DO UPDATE SET value = excluded.value, category = 'system', updatedBy = 'whatsapp_gateway'",
+        [jsonStr]
+      );
+      console.log('☁️ WhatsApp Session securely backed up to Turso Cloud DB!');
+    } catch (e) {
+      console.error('Failed saving session to Turso:', e.message);
+    }
+  }, 3000);
+}
+
+// ----------------------------------------------------
+// Baileys Socket Lifecycle
+// ----------------------------------------------------
 let waSock = null;
-let waStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'qr' | 'connected'
+let waStatus = 'disconnected';
 let waQrBase64 = '';
 let connectedPhone = '';
 
@@ -28,6 +115,8 @@ async function initBaileys() {
   if (waStatus === 'connected' || waStatus === 'connecting') return;
   waStatus = 'connecting';
   waQrBase64 = '';
+
+  await restoreSessionFromTurso();
 
   try {
     const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = await import('@whiskeysockets/baileys');
@@ -39,7 +128,7 @@ async function initBaileys() {
       auth: state,
       printQRInTerminal: true,
       logger: pino({ level: 'silent' }),
-      browser: ['Tapowan School Gateway', 'Chrome', '1.0.0']
+      browser: ['Tapowan Cloud Gateway', 'Chrome', '1.0.0']
     });
 
     waSock.ev.on('connection.update', async (update) => {
@@ -48,7 +137,7 @@ async function initBaileys() {
       if (qr) {
         waStatus = 'qr';
         waQrBase64 = await qrcode.toDataURL(qr, { margin: 2, scale: 8, color: { dark: '#0f172a', light: '#ffffff' } });
-        console.log('📱 WhatsApp QR Code generated. Scan from Web UI or Terminal.');
+        console.log('📱 WhatsApp QR Code generated. Scan from Web UI.');
       }
 
       if (connection === 'close') {
@@ -59,8 +148,9 @@ async function initBaileys() {
         console.log(`⚠️ Connection closed (code: ${statusCode}). Reconnecting in 5s...`);
         
         if (statusCode === DisconnectReason.loggedOut) {
-          console.log('Logged out. Cleaning auth directory...');
+          console.log('Logged out. Cleaning auth directory and Turso session...');
           try { fs.rmSync(AUTH_FOLDER, { recursive: true, force: true }); } catch (e) {}
+          await executeTursoQuery("DELETE FROM settings WHERE key = 'baileys_cloud_auth'");
         }
         setTimeout(initBaileys, 5000);
       } else if (connection === 'open') {
@@ -68,10 +158,14 @@ async function initBaileys() {
         waQrBase64 = '';
         connectedPhone = waSock.user?.id ? waSock.user.id.split(':')[0] : 'Connected';
         console.log(`✅ WhatsApp Gateway Connected Successfully! Phone: ${connectedPhone}`);
+        debouncedSaveSessionToTurso();
       }
     });
 
-    waSock.ev.on('creds.update', saveCreds);
+    waSock.ev.on('creds.update', () => {
+      saveCreds();
+      debouncedSaveSessionToTurso();
+    });
   } catch (err) {
     waStatus = 'disconnected';
     console.error('❌ Failed to initialize Baileys:', err.message);
@@ -79,54 +173,78 @@ async function initBaileys() {
   }
 }
 
-// Start WhatsApp Gateway
 initBaileys();
 
-// Helper: Auth middleware (optional, skips if API_KEY not sent or matching)
-const checkApiKey = (req, res, next) => {
+// ----------------------------------------------------
+// 24/7 Keep-Alive Engine (Anti-Sleep for Render)
+// ----------------------------------------------------
+setInterval(async () => {
+  try {
+    const urls = [
+      `http://localhost:${PORT}/api/health`,
+      `${RENDER_EXTERNAL_URL.replace(/\/$/, '')}/api/health`
+    ];
+    for (const u of urls) {
+      await fetch(u).catch(() => {});
+    }
+  } catch (e) {}
+}, 4 * 60 * 1000);
+
+// ----------------------------------------------------
+// Auth Middleware
+// ----------------------------------------------------
+const checkAuth = (req, res, next) => {
   const key = req.headers['x-api-key'] || req.query.key;
-  if (API_KEY && key && key !== API_KEY) {
-    return res.status(401).json({ error: 'Invalid API Key' });
+  const pin = req.headers['x-admin-pin'] || req.body?.pin;
+  if ((key && key === API_KEY) || (pin && pin === ADMIN_PIN)) {
+    return next();
   }
-  next();
+  return res.status(401).json({ error: 'Unauthorized: Invalid Admin PIN or API Key' });
 };
 
 // ==========================================
-// 1. WEB UI DASHBOARD & QR SCANNER
+// 1. SECURE WEB UI DASHBOARD (PIN PROTECTED)
 // ==========================================
 app.get('/', (req, res) => {
-  const html = `
-<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TPS WhatsApp Gateway Cloud</title>
+  <title>TPS WhatsApp Cloud Gateway (Protected)</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
     * { margin:0; padding:0; box-sizing:border-box; font-family:'Plus Jakarta Sans', sans-serif; }
-    body { background:#0f172a; color:#f8fafc; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; }
-    .card { background:#1e293b; border:1px solid #334155; border-radius:24px; padding:32px; width:100%; max-width:540px; box-shadow:0 20px 40px rgba(0,0,0,0.4); text-align:center; }
+    body { background:#0b0f19; color:#f8fafc; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; }
+    .card { background:#151c2c; border:1px solid #28354f; border-radius:24px; padding:32px; width:100%; max-width:540px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.6); text-align:center; }
     .header { display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:20px; }
-    .logo { width:44px; height:44px; background:#10b981; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:24px; }
+    .logo { width:46px; height:46px; background:#10b981; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:24px; box-shadow:0 8px 16px rgba(16,185,129,0.3); }
     h1 { font-size:20px; font-weight:800; color:#ffffff; }
     .sub { font-size:13px; color:#94a3b8; margin-top:2px; }
-    .status-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 16px; border-radius:20px; font-size:13px; font-weight:700; margin:16px 0; }
+    
+    .status-pill { display:inline-flex; align-items:center; gap:8px; padding:6px 18px; border-radius:20px; font-size:13px; font-weight:700; margin:16px 0; }
     .status-connected { background:rgba(16,185,129,0.15); color:#10b981; border:1px solid rgba(16,185,129,0.3); }
     .status-qr { background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.3); }
     .status-disconnected { background:rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.3); }
+    
     .qr-box { background:#ffffff; border-radius:16px; padding:16px; margin:20px auto; width:280px; height:280px; display:flex; align-items:center; justify-content:center; }
     .qr-box img { width:100%; height:100%; object-fit:contain; }
-    .connected-box { background:rgba(16,185,129,0.1); border:1.5px dashed #10b981; border-radius:16px; padding:24px; margin:20px 0; text-align:center; }
+    .connected-box { background:rgba(16,185,129,0.08); border:1.5px dashed #10b981; border-radius:16px; padding:24px; margin:20px 0; text-align:center; }
     .connected-box h3 { color:#10b981; font-size:18px; margin-bottom:6px; }
-    .test-box { margin-top:24px; text-align:left; background:#0f172a; padding:18px; border-radius:16px; border:1px solid #334155; }
+    
+    .lock-box { background:#1e293b; border:1px solid #334155; border-radius:16px; padding:24px; margin-top:20px; }
+    .test-box { margin-top:24px; text-align:left; background:#0b0f19; padding:20px; border-radius:16px; border:1px solid #28354f; }
     .test-box h4 { font-size:14px; font-weight:700; margin-bottom:12px; color:#cbd5e1; }
-    input, textarea, button { width:100%; padding:10px 14px; border-radius:10px; border:1px solid #334155; background:#1e293b; color:#fff; font-size:13px; margin-bottom:10px; outline:none; }
-    input:focus, textarea:focus { border-color:#3b82f6; }
+    
+    input, textarea, button { width:100%; padding:12px 14px; border-radius:12px; border:1px solid #28354f; background:#1e293b; color:#fff; font-size:13px; margin-bottom:12px; outline:none; transition:0.2s; }
+    input:focus, textarea:focus { border-color:#10b981; }
     button { background:#10b981; color:#fff; font-weight:700; cursor:pointer; border:none; transition:0.2s; }
     button:hover { background:#059669; }
     .logout-btn { background:#ef4444; margin-top:8px; }
     .logout-btn:hover { background:#dc2626; }
+    .lock-btn { background:#3b82f6; }
+    .lock-btn:hover { background:#2563eb; }
+    .pin-input { font-size:18px; letter-spacing:4px; text-align:center; font-weight:bold; }
   </style>
 </head>
 <body>
@@ -135,41 +253,104 @@ app.get('/', (req, res) => {
       <div class="logo">💬</div>
       <div>
         <h1>Tapowan WhatsApp Gateway</h1>
-        <div class="sub">24/7 Dedicated Cloud Microservice</div>
+        <div class="sub">24/7 Cloud Microservice • Anti-Sleep Active ⚡</div>
       </div>
     </div>
 
-    <div id="statusContainer">
-      <div class="status-pill status-qr">🔄 Connecting to WhatsApp...</div>
+    <!-- LOCK SCREEN (Shown when not authenticated) -->
+    <div id="lockScreen" class="lock-box">
+      <div style="font-size:36px; margin-bottom:10px;">🔒</div>
+      <h3 style="font-size:16px; margin-bottom:6px; color:#f8fafc;">Admin PIN Protected</h3>
+      <p style="font-size:12px; color:#94a3b8; margin-bottom:16px;">Enter the Master PIN to manage WhatsApp connection, scan QR, or send messages.</p>
+      <input type="password" id="pinInput" class="pin-input" placeholder="••••••••" onkeydown="if(event.key==='Enter') verifyPin()" />
+      <button onclick="verifyPin()" class="lock-btn">Unlock Gateway Dashboard</button>
+      <div id="pinError" style="color:#ef4444; font-size:12px; margin-top:6px; display:none;">❌ Invalid Admin PIN</div>
     </div>
 
-    <div id="qrContainer" style="display:none;">
-      <div class="qr-box">
-        <img id="qrImg" src="" alt="Scan QR Code" />
+    <!-- DASHBOARD CONTENT (Shown only after PIN verification) -->
+    <div id="dashboardScreen" style="display:none;">
+      <div id="statusContainer">
+        <div class="status-pill status-qr">🔄 Connecting...</div>
       </div>
-      <p style="font-size:12px; color:#94a3b8;">Open WhatsApp on phone ➔ Linked Devices ➔ Link a Device and scan.</p>
-    </div>
 
-    <div id="connectedContainer" style="display:none;" class="connected-box">
-      <h3>✅ Gateway Online & Active</h3>
-      <p style="font-size:13px; color:#cbd5e1;">Connected Phone: <b id="phoneVal"></b></p>
-      <button class="logout-btn" onclick="logout()">Disconnect / Logout</button>
-    </div>
+      <div id="qrContainer" style="display:none;">
+        <div class="qr-box">
+          <img id="qrImg" src="" alt="Scan QR Code" />
+        </div>
+        <p style="font-size:12px; color:#94a3b8;">Open WhatsApp on phone ➔ Linked Devices ➔ Link a Device and scan.</p>
+      </div>
 
-    <!-- Quick Live Test Sender -->
-    <div class="test-box">
-      <h4>⚡ Quick Message Test</h4>
-      <input type="text" id="testPhone" placeholder="Enter Phone (e.g. 919876543210)" />
-      <textarea id="testMsg" rows="2" placeholder="Message content">Test from Tapowan Cloud WhatsApp Gateway! 🚀</textarea>
-      <button onclick="sendTestMsg()">Send Test Message</button>
-      <div id="testResult" style="font-size:12px; margin-top:6px;"></div>
+      <div id="connectedContainer" style="display:none;" class="connected-box">
+        <h3>✅ Gateway Online & Active</h3>
+        <p style="font-size:14px; color:#cbd5e1; margin-bottom:12px;">Connected Phone: <b id="phoneVal" style="color:#10b981;"></b></p>
+        <button class="logout-btn" onclick="logout()">Disconnect / Logout</button>
+      </div>
+
+      <!-- Quick Live Test Sender -->
+      <div class="test-box">
+        <h4>⚡ Send Test WhatsApp Message</h4>
+        <input type="text" id="testPhone" placeholder="Enter Phone (e.g. 917488061954)" />
+        <textarea id="testMsg" rows="2" placeholder="Message content">Test from Tapowan 24/7 Cloud WhatsApp Gateway! 🚀</textarea>
+        <button onclick="sendTestMsg()">Send Message</button>
+        <div id="testResult" style="font-size:12px; margin-top:6px;"></div>
+      </div>
+
+      <button onclick="lockDashboard()" style="background:transparent; border:1px solid #334155; color:#94a3b8; font-size:12px; margin-top:16px;">
+        🔒 Lock Dashboard
+      </button>
     </div>
   </div>
 
   <script>
+    let savedPin = localStorage.getItem('tps_gateway_pin') || '';
+
+    function checkSavedPin() {
+      if (savedPin) {
+        document.getElementById('lockScreen').style.display = 'none';
+        document.getElementById('dashboardScreen').style.display = 'block';
+        updateStatus();
+      } else {
+        document.getElementById('lockScreen').style.display = 'block';
+        document.getElementById('dashboardScreen').style.display = 'none';
+      }
+    }
+
+    async function verifyPin() {
+      const pin = document.getElementById('pinInput').value.trim();
+      if (!pin) return;
+      
+      const res = await fetch('/api/verify-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        savedPin = pin;
+        localStorage.setItem('tps_gateway_pin', pin);
+        document.getElementById('pinError').style.display = 'none';
+        document.getElementById('lockScreen').style.display = 'none';
+        document.getElementById('dashboardScreen').style.display = 'block';
+        updateStatus();
+      } else {
+        document.getElementById('pinError').style.display = 'block';
+      }
+    }
+
+    function lockDashboard() {
+      localStorage.removeItem('tps_gateway_pin');
+      savedPin = '';
+      document.getElementById('lockScreen').style.display = 'block';
+      document.getElementById('dashboardScreen').style.display = 'none';
+      document.getElementById('pinInput').value = '';
+    }
+
     async function updateStatus() {
+      if (!savedPin) return;
       try {
-        const res = await fetch('/api/status');
+        const res = await fetch('/api/status', {
+          headers: { 'x-admin-pin': savedPin }
+        });
         const data = await res.json();
         
         const statusDiv = document.getElementById('statusContainer');
@@ -179,7 +360,7 @@ app.get('/', (req, res) => {
         const phoneVal = document.getElementById('phoneVal');
 
         if (data.status === 'connected') {
-          statusDiv.innerHTML = '<div class="status-pill status-connected">🟢 Connected 24/7</div>';
+          statusDiv.innerHTML = '<div class="status-pill status-connected">🟢 Connected 24/7 (Protected)</div>';
           qrDiv.style.display = 'none';
           connDiv.style.display = 'block';
           phoneVal.innerText = data.phone || 'Active';
@@ -189,7 +370,7 @@ app.get('/', (req, res) => {
           qrDiv.style.display = 'block';
           connDiv.style.display = 'none';
         } else {
-          statusDiv.innerHTML = '<div class="status-pill status-disconnected">🔴 Disconnected (Reconnecting...)</div>';
+          statusDiv.innerHTML = '<div class="status-pill status-disconnected">🔴 Disconnected (Connecting...)</div>';
           qrDiv.style.display = 'none';
           connDiv.style.display = 'none';
         }
@@ -206,7 +387,10 @@ app.get('/', (req, res) => {
       try {
         const res = await fetch('/api/send', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-pin': savedPin
+          },
           body: JSON.stringify({ to, message })
         });
         const d = await res.json();
@@ -221,41 +405,58 @@ app.get('/', (req, res) => {
     }
 
     async function logout() {
-      if (!confirm('Are you sure you want to disconnect?')) return;
-      await fetch('/api/logout', { method: 'POST' });
+      if (!confirm('Are you sure you want to disconnect WhatsApp from Cloud?')) return;
+      await fetch('/api/logout', {
+        method: 'POST',
+        headers: { 'x-admin-pin': savedPin }
+      });
       updateStatus();
     }
 
+    checkSavedPin();
     setInterval(updateStatus, 3000);
-    updateStatus();
   </script>
 </body>
-</html>
-  `;
+</html>`;
   res.send(html);
 });
 
 // ==========================================
-// 2. REST API ENDPOINTS
+// 2. REST API ENDPOINTS (AUTHENTICATED)
 // ==========================================
 
-// GET /api/status
+// POST /api/verify-pin (PIN Validation)
+app.post('/api/verify-pin', (req, res) => {
+  const { pin } = req.body || {};
+  if (pin && pin === ADMIN_PIN) {
+    return res.json({ ok: true });
+  }
+  res.status(401).json({ error: 'Invalid PIN' });
+});
+
+// GET /api/status (Status query)
 app.get('/api/status', (req, res) => {
+  const key = req.headers['x-api-key'] || req.query.key;
+  const pin = req.headers['x-admin-pin'] || req.query.pin;
+  const isAuth = (key && key === API_KEY) || (pin && pin === ADMIN_PIN);
+
   res.json({
     status: waStatus,
-    phone: connectedPhone,
-    qr: waQrBase64,
-    uptime: Math.round(process.uptime())
+    phone: isAuth ? connectedPhone : (waStatus === 'connected' ? 'Connected' : ''),
+    qr: isAuth ? waQrBase64 : (waStatus === 'qr' ? 'PROTECTED_PIN_REQUIRED' : ''),
+    uptime: Math.round(process.uptime()),
+    antiSleep: true,
+    protected: true
   });
 });
 
-// GET /api/health
+// GET /api/health (Keep-Alive health check)
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, status: waStatus, uptime: process.uptime() });
+  res.json({ ok: true, status: waStatus, uptime: Math.round(process.uptime()), antiSleep: true });
 });
 
-// POST /api/logout
-app.post('/api/logout', checkApiKey, async (req, res) => {
+// POST /api/logout (Protected)
+app.post('/api/logout', checkAuth, async (req, res) => {
   try {
     if (waSock) {
       await waSock.logout();
@@ -266,6 +467,7 @@ app.post('/api/logout', checkApiKey, async (req, res) => {
     if (fs.existsSync(AUTH_FOLDER)) {
       fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
     }
+    await executeTursoQuery("DELETE FROM settings WHERE key = 'baileys_cloud_auth'");
     setTimeout(initBaileys, 1000);
     res.json({ ok: true });
   } catch (err) {
@@ -273,8 +475,8 @@ app.post('/api/logout', checkApiKey, async (req, res) => {
   }
 });
 
-// POST /api/send (Send Text or Media)
-app.post('/api/send', checkApiKey, async (req, res) => {
+// POST /api/send (Send Text or Media - Protected)
+app.post('/api/send', checkAuth, async (req, res) => {
   const { to, message, attachment } = req.body || {};
   if (!to || (!message && !attachment)) {
     return res.status(400).json({ error: "Missing 'to' or 'message' parameters" });
@@ -327,8 +529,8 @@ app.post('/api/send', checkApiKey, async (req, res) => {
   }
 });
 
-// POST /api/send-bulk (Rate-limited safe bulk sender)
-app.post('/api/send-bulk', checkApiKey, async (req, res) => {
+// POST /api/send-bulk (Rate-limited safe bulk sender - Protected)
+app.post('/api/send-bulk', checkAuth, async (req, res) => {
   const { messages } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Messages must be a non-empty array.' });
@@ -338,7 +540,6 @@ app.post('/api/send-bulk', checkApiKey, async (req, res) => {
     return res.status(503).json({ error: 'WhatsApp is not connected.' });
   }
 
-  // Respond immediately, process in background with delays to protect WhatsApp number
   res.json({ ok: true, queued: messages.length, message: 'Processing in background safely...' });
 
   (async () => {
@@ -353,7 +554,6 @@ app.post('/api/send-bulk', checkApiKey, async (req, res) => {
       } catch (err) {
         console.error(`[Bulk Error] Failed for ${item.to}:`, err.message);
       }
-      // Safety delay: 3 to 6 seconds between messages
       const delay = Math.floor(Math.random() * 3000) + 3000;
       await new Promise(r => setTimeout(r, delay));
     }
@@ -362,8 +562,10 @@ app.post('/api/send-bulk', checkApiKey, async (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`====================================================`);
-  console.log(`🚀 Tapowan WhatsApp Gateway running on port ${PORT}`);
-  console.log(`🌐 Web UI & QR Scanner: http://localhost:${PORT}`);
-  console.log(`====================================================`);
+  console.log('====================================================');
+  console.log(`🚀 Tapowan Protected WhatsApp Gateway running on port ${PORT}`);
+  console.log('🔒 Admin PIN Protection: ENABLED');
+  console.log('⚡ Anti-Sleep Keep-Alive: ACTIVE');
+  console.log('☁️ Turso Session Sync: ACTIVE');
+  console.log('====================================================');
 });
