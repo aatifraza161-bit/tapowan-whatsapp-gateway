@@ -1,0 +1,12 @@
+﻿services:
+  - type: web
+    name: tapowan-whatsapp-gateway
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: API_KEY
+        value: tps_secret_gateway_key_2026
