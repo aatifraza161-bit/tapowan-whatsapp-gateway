@@ -170,21 +170,33 @@ async function initBaileys() {
     // Inbound WhatsApp Message Listener (Auto-Approval & Webhook Forwarder)
     waSock.ev.on('messages.upsert', async ({ messages, type }) => {
       try {
-        if (type !== 'notify') return;
+        if (!Array.isArray(messages)) return;
         for (const msg of messages) {
-          if (!msg.message || msg.key.fromMe) continue;
-          const sender = msg.key.remoteJid;
+          if (!msg.message) continue;
+
+          let sender = msg.key.remoteJid;
           if (!sender || sender.includes('@g.us')) continue; // Ignore group chats
 
-          const text = msg.message.conversation ||
-                       msg.message.extendedTextMessage?.text ||
-                       msg.message.imageMessage?.caption ||
-                       msg.message.videoMessage?.caption ||
-                       msg.message.documentMessage?.caption ||
+          if (msg.key.fromMe) {
+            sender = waSock.user?.id ? waSock.user.id.split(':')[0] : sender;
+          }
+
+          // Unpack message from ephemeral / viewOnce wrappers
+          const realMsg = msg.message.ephemeralMessage?.message ||
+                         msg.message.viewOnceMessage?.message ||
+                         msg.message.viewOnceMessageV2?.message ||
+                         msg.message.documentWithCaptionMessage?.message ||
+                         msg.message;
+
+          const text = realMsg?.conversation ||
+                       realMsg?.extendedTextMessage?.text ||
+                       realMsg?.imageMessage?.caption ||
+                       realMsg?.videoMessage?.caption ||
+                       realMsg?.documentMessage?.caption ||
                        "";
 
           if (text) {
-            const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '');
+            const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '').replace(/\D/g, '');
             console.log(`📩 [Gateway Inbound] From ${cleanPhone}: "${text}"`);
 
             // Forward to Tapowan Public School Vercel Webhook
