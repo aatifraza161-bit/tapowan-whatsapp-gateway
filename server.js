@@ -17,8 +17,8 @@ const ADMIN_PIN = process.env.ADMIN_PIN || 'tapowan2026';
 const AUTH_FOLDER = path.join(__dirname, 'auth_info');
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || 'https://tapowan-whatsapp-gateway.onrender.com';
 
-const TURSO_URL = process.env.TURSO_DATABASE_URL || 'https://tapowan-im-aatif.aws-ap-northeast-1.turso.io';
-const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODY1MTcyOTQsImlkIjoiMDE5ZmY0YWUtM2YwMS03YTYwLWI4NTgtMWQ4M2JlYjJkNzJkIiwia2lkIjoiblRLTmdsNnYyaFQ4LTlhT09uQV9JdERDc3BTdk9iejhSYzNuY0hSNUhOVSIsInJpZCI6ImZmMWI4YTE5LWFhZTgtNGM5MS1hNjFhLTlkMTY1NTQ1OTEyOCJ9.a-w2gyEauZrfLwqWAMh2QLqHmqOxIsziDu9WRBrCPmLaoZThvoDlPdW4VjQ6ST5hRYJj1E1R0sJELyNPg4zrBQ';
+const TURSO_URL = process.env.TURSO_DATABASE_URL || 'https://tapowan-v2-tapowan.aws-ap-south-1.turso.io';
+const TURSO_TOKEN = process.env.TURSO_AUTH_TOKEN || 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODkwOTIyMTUsImlkIjoiMDFhMDhlMzQtODMwMS03MDI0LTk5ZWQtMGQ0MmYwMGJiNjFlIiwia2lkIjoiVFRPdk5ISlFYZVAtX1FsNG9ZUXM4cTBTYXRiZzJ1UmVhYjlUbjFyem1tcyIsInJpZCI6ImVjNjc2YzExLTRhNGUtNGZhNi1hMTM1LTJmZDk4YTIxNzliMSJ9.RmzczPOvgV3Hd83byF7fMfQsCzlJnF8r9MCGtzTfZDj8k--VqtItniZN5GCiPfv4-dCEmDZaIWDGPOnM-EknDA';
 
 if (!fs.existsSync(AUTH_FOLDER)) {
   fs.mkdirSync(AUTH_FOLDER, { recursive: true });
@@ -165,6 +165,55 @@ async function initBaileys() {
     waSock.ev.on('creds.update', () => {
       saveCreds();
       debouncedSaveSessionToTurso();
+    });
+
+    // Inbound WhatsApp Message Listener (Auto-Approval & Webhook Forwarder)
+    waSock.ev.on('messages.upsert', async ({ messages, type }) => {
+      try {
+        if (type !== 'notify') return;
+        for (const msg of messages) {
+          if (!msg.message || msg.key.fromMe) continue;
+          const sender = msg.key.remoteJid;
+          if (!sender || sender.includes('@g.us')) continue; // Ignore group chats
+
+          const text = msg.message.conversation ||
+                       msg.message.extendedTextMessage?.text ||
+                       msg.message.imageMessage?.caption ||
+                       msg.message.videoMessage?.caption ||
+                       msg.message.documentMessage?.caption ||
+                       "";
+
+          if (text) {
+            const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '');
+            console.log(`📩 [Gateway Inbound] From ${cleanPhone}: "${text}"`);
+
+            // Forward to Tapowan Public School Vercel Webhook
+            const webhookUrl = process.env.TAPOWAN_WEBHOOK_URL || 'https://tapowan-school.vercel.app/api/whatsapp/webhook';
+            try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 25000);
+              const res = await fetch(webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  from: cleanPhone,
+                  sender: cleanPhone,
+                  message: text,
+                  text: text
+                }),
+                signal: controller.signal
+              });
+              clearTimeout(timeoutId);
+              const resJson = await res.json();
+              console.log(`✅ [Webhook Processed] for ${cleanPhone}:`, resJson);
+            } catch (whErr) {
+              console.error(`❌ [Webhook Forward Error] for ${cleanPhone}:`, whErr.message);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('❌ [messages.upsert error]:', err.message);
+      }
     });
   } catch (err) {
     waStatus = 'disconnected';
