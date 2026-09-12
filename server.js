@@ -111,6 +111,13 @@ let waStatus = 'disconnected';
 let waQrBase64 = '';
 let connectedPhone = '';
 
+// In-memory debug log of last 50 inbound messages
+const inboundLog = [];
+function logInbound(entry) {
+  inboundLog.unshift({ ...entry, ts: new Date().toISOString() });
+  if (inboundLog.length > 50) inboundLog.length = 50;
+}
+
 async function initBaileys() {
   if (waStatus === 'connected' || waStatus === 'connecting') return;
   waStatus = 'connecting';
@@ -174,12 +181,16 @@ async function initBaileys() {
         for (const msg of messages) {
           if (!msg.message) continue;
 
-          let sender = msg.key.remoteJid;
-          if (!sender || sender.includes('@g.us')) continue; // Ignore group chats
-
+          // CRITICAL: Skip ALL outgoing messages from the bot itself
           if (msg.key.fromMe) {
-            sender = waSock.user?.id ? waSock.user.id.split(':')[0] : sender;
+            continue;
           }
+
+          let sender = msg.key.remoteJid;
+          if (!sender || sender.includes('@g.us') || sender.includes('@broadcast')) continue;
+
+          // Skip protocol/system messages
+          if (msg.message.protocolMessage || msg.message.senderKeyDistributionMessage) continue;
 
           // Unpack message from ephemeral / viewOnce wrappers
           const realMsg = msg.message.ephemeralMessage?.message ||
@@ -187,6 +198,7 @@ async function initBaileys() {
                          msg.message.viewOnceMessageV2?.message ||
                          msg.message.documentWithCaptionMessage?.message ||
                          msg.message;
+
 
           const text = (realMsg?.conversation ||
                        realMsg?.extendedTextMessage?.text ||
@@ -197,58 +209,40 @@ async function initBaileys() {
 
           if (!text) continue;
 
-          // 1. CRITICAL: NEVER forward bot's own automated replies/alerts
-          if (
-            text.startsWith('❌') ||
-            text.startsWith('✅') ||
-            text.startsWith('🔔') ||
-            text.startsWith('🎉') ||
-            text.startsWith('⚠️') ||
-            text.startsWith('ℹ️') ||
-            text.startsWith('📋') ||
-            text.startsWith('🏫') ||
-            text.includes('TAPOWAN PUBLIC SCHOOL') ||
-            text.includes('AUTHENTICATION FAILED') ||
-            text.includes('PAYMENT APPROVED') ||
-            text.includes('PAYMENT RECORD NOT FOUND') ||
-            text.includes('NO PENDING PAYMENTS') ||
-            text.includes('ALL PAYMENTS APPROVED') ||
-            text.includes('Example: APPROVE') ||
-            text.includes('Invalid approval password')
-          ) {
-            continue; // Skip bot's own responses to prevent infinite echo loops
-          }
+          const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '').replace(/\D/g, '');
+          
+          // Log every inbound message for debugging
+          logInbound({ from: cleanPhone, text: text.substring(0, 200), forwarded: true });
+          console.log(`📩 [Gateway Inbound] From ${cleanPhone}: "${text}"`);
 
-          if (text) {
-            const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '').replace(/\D/g, '');
-            console.log(`📩 [Gateway Inbound] From ${cleanPhone}: "${text}"`);
-
-            // Forward to Tapowan Public School Vercel Webhook
-            const webhookUrl = process.env.TAPOWAN_WEBHOOK_URL || 'https://tapowan-school.vercel.app/api/whatsapp/webhook';
-            try {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 25000);
-              const res = await fetch(webhookUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  from: cleanPhone,
-                  sender: cleanPhone,
-                  message: text,
-                  text: text
-                }),
-                signal: controller.signal
-              });
-              clearTimeout(timeoutId);
-              const resJson = await res.json();
-              console.log(`✅ [Webhook Processed] for ${cleanPhone}:`, resJson);
-            } catch (whErr) {
-              console.error(`❌ [Webhook Forward Error] for ${cleanPhone}:`, whErr.message);
-            }
+          // Forward to Tapowan Public School Vercel Webhook
+          const webhookUrl = process.env.TAPOWAN_WEBHOOK_URL || 'https://tapowan-school.vercel.app/api/whatsapp/webhook';
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 25000);
+            const res = await fetch(webhookUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                from: cleanPhone,
+                sender: cleanPhone,
+                message: text,
+                text: text
+              }),
+              signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            const resJson = await res.json();
+            console.log(`✅ [Webhook Response] for ${cleanPhone}:`, JSON.stringify(resJson));
+            logInbound({ from: cleanPhone, text: text.substring(0, 100), webhookResult: resJson.ok ? 'SUCCESS' : 'FAIL', detail: JSON.stringify(resJson).substring(0, 200) });
+          } catch (whErr) {
+            console.error(`❌ [Webhook Forward Error] for ${cleanPhone}:`, whErr.message);
+            logInbound({ from: cleanPhone, text: text.substring(0, 100), webhookResult: 'ERROR', detail: whErr.message });
           }
         }
       } catch (err) {
         console.error('❌ [messages.upsert error]:', err.message);
+        logInbound({ error: err.message });
       }
     });
   } catch (err) {
@@ -558,6 +552,11 @@ app.post('/api/logout', checkAuth, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// GET /api/recent-messages (Debug - shows last 50 inbound messages)
+app.get('/api/recent-messages', checkAuth, (req, res) => {
+  res.json({ ok: true, count: inboundLog.length, messages: inboundLog });
 });
 
 // POST /api/send (Send Text or Media - Protected)
