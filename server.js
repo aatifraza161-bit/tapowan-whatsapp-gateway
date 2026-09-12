@@ -224,8 +224,8 @@ async function initBaileys() {
           const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '').replace(/\D/g, '');
           
           // Log every inbound message for debugging
-          logInbound({ from: cleanPhone, text: text.substring(0, 200), forwarded: true });
-          console.log(`📩 [Gateway Inbound] From ${cleanPhone}: "${text}"`);
+          logInbound({ from: cleanPhone, jid: sender, text: text.substring(0, 200), forwarded: true });
+          console.log(`📩 [Gateway Inbound] From ${cleanPhone} (JID: ${sender}): "${text}"`);
 
           // Forward to Tapowan Public School Vercel Webhook
           const webhookUrl = process.env.TAPOWAN_WEBHOOK_URL || 'https://tapowan-school.vercel.app/api/whatsapp/webhook';
@@ -238,6 +238,7 @@ async function initBaileys() {
               body: JSON.stringify({
                 from: cleanPhone,
                 sender: cleanPhone,
+                jid: sender,
                 message: text,
                 text: text
               }),
@@ -246,7 +247,7 @@ async function initBaileys() {
             clearTimeout(timeoutId);
             const resJson = await res.json();
             console.log(`✅ [Webhook Response] for ${cleanPhone}:`, JSON.stringify(resJson));
-            logInbound({ from: cleanPhone, text: text.substring(0, 100), webhookResult: resJson.ok ? 'SUCCESS' : 'FAIL', detail: JSON.stringify(resJson).substring(0, 200) });
+            logInbound({ from: cleanPhone, jid: sender, text: text.substring(0, 100), webhookResult: resJson.ok ? 'SUCCESS' : 'FAIL', detail: JSON.stringify(resJson).substring(0, 200) });
           } catch (whErr) {
             console.error(`❌ [Webhook Forward Error] for ${cleanPhone}:`, whErr.message);
             logInbound({ from: cleanPhone, text: text.substring(0, 100), webhookResult: 'ERROR', detail: whErr.message });
@@ -583,9 +584,19 @@ app.post('/api/send', checkAuth, async (req, res) => {
   }
 
   try {
-    let cleanNumber = String(to).replace(/\D/g, '');
-    if (cleanNumber.length === 10) cleanNumber = '91' + cleanNumber;
-    const jid = `${cleanNumber}@s.whatsapp.net`;
+    let target = String(to).trim();
+    let jid;
+    if (target.includes('@lid') || target.includes('@s.whatsapp.net')) {
+      jid = target;
+    } else {
+      const digits = target.replace(/\D/g, '');
+      if (digits.length > 13) {
+        jid = `${digits}@lid`;
+      } else {
+        let cleanNumber = digits.length === 10 ? '91' + digits : digits;
+        jid = `${cleanNumber}@s.whatsapp.net`;
+      }
+    }
 
     if (attachment) {
       let buffer, mimetype = 'image/jpeg', fileName = 'document.pdf';
