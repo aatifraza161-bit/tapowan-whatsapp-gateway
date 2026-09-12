@@ -188,12 +188,36 @@ async function initBaileys() {
                          msg.message.documentWithCaptionMessage?.message ||
                          msg.message;
 
-          const text = realMsg?.conversation ||
+          const text = (realMsg?.conversation ||
                        realMsg?.extendedTextMessage?.text ||
                        realMsg?.imageMessage?.caption ||
                        realMsg?.videoMessage?.caption ||
                        realMsg?.documentMessage?.caption ||
-                       "";
+                       "").trim();
+
+          if (!text) continue;
+
+          // 1. CRITICAL: NEVER forward bot's own automated replies/alerts
+          if (
+            text.startsWith('❌') ||
+            text.startsWith('✅') ||
+            text.startsWith('🔔') ||
+            text.startsWith('🎉') ||
+            text.startsWith('⚠️') ||
+            text.startsWith('ℹ️') ||
+            text.startsWith('📋') ||
+            text.startsWith('🏫') ||
+            text.includes('TAPOWAN PUBLIC SCHOOL') ||
+            text.includes('AUTHENTICATION FAILED') ||
+            text.includes('PAYMENT APPROVED') ||
+            text.includes('PAYMENT RECORD NOT FOUND') ||
+            text.includes('NO PENDING PAYMENTS') ||
+            text.includes('ALL PAYMENTS APPROVED') ||
+            text.includes('Example: APPROVE') ||
+            text.includes('Invalid approval password')
+          ) {
+            continue; // Skip bot's own responses to prevent infinite echo loops
+          }
 
           if (text) {
             const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '').replace(/\D/g, '');
