@@ -56,6 +56,9 @@ async function executeTursoQuery(sql, args = []) {
 
 async function restoreSessionFromTurso() {
   try {
+    // Ensure unique index on settings table key
+    await executeTursoQuery("CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key ON settings(key)");
+
     if (fs.existsSync(path.join(AUTH_FOLDER, 'creds.json'))) {
       console.log('📦 Local credentials exist, skipping Turso restore.');
       return;
@@ -78,7 +81,7 @@ async function restoreSessionFromTurso() {
 }
 
 let syncTimeout = null;
-function debouncedSaveSessionToTurso() {
+function debouncedSaveSessionToTurso(delay = 2000) {
   if (syncTimeout) clearTimeout(syncTimeout);
   syncTimeout = setTimeout(async () => {
     try {
@@ -92,15 +95,24 @@ function debouncedSaveSessionToTurso() {
       }
       const jsonStr = JSON.stringify(filesObj);
       
-      await executeTursoQuery(
+      const saveRes = await executeTursoQuery(
         "INSERT INTO settings (key, value, category, updatedBy) VALUES ('baileys_cloud_auth', ?, 'system', 'whatsapp_gateway') ON CONFLICT(key) DO UPDATE SET value = excluded.value, category = 'system', updatedBy = 'whatsapp_gateway'",
         [jsonStr]
       );
-      console.log('☁️ WhatsApp Session securely backed up to Turso Cloud DB!');
+      
+      // Fallback if ON CONFLICT had an issue
+      if (saveRes?.results?.[0]?.type === 'error') {
+        await executeTursoQuery("DELETE FROM settings WHERE key = 'baileys_cloud_auth'");
+        await executeTursoQuery(
+          "INSERT INTO settings (key, value, category, updatedBy) VALUES ('baileys_cloud_auth', ?, 'system', 'whatsapp_gateway')",
+          [jsonStr]
+        );
+      }
+      console.log(`☁️ WhatsApp Session (${fileNames.length} files, ${Math.round(jsonStr.length / 1024)} KB) backed up to Turso Cloud!`);
     } catch (e) {
       console.error('Failed saving session to Turso:', e.message);
     }
-  }, 3000);
+  }, delay);
 }
 
 // ----------------------------------------------------
