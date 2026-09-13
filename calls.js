@@ -101,18 +101,54 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
     const sReceiverId = String(receiverId || '').trim();
     const rawId = sReceiverId.replace('EMP-', '');
 
+    // 1. Direct search in app_push_tokens
     const res = await executeTursoQuery(
       `SELECT token FROM app_push_tokens 
        WHERE admission_no = ? 
           OR admission_no = ? 
           OR admission_no = ?
+          OR admission_no LIKE ?
        ORDER BY id DESC LIMIT 10`,
-      [sReceiverId, rawId, `EMP-${rawId}`]
+      [sReceiverId, rawId, `EMP-${rawId}`, `%${rawId}%`]
     );
 
-    const rows = res?.results?.[0]?.response?.result?.rows || [];
-    const tokens = [...new Set(rows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')))];
-    if (tokens.length === 0) return;
+    let rows = res?.results?.[0]?.response?.result?.rows || [];
+    let tokens = [...new Set(rows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')))];
+
+    // 2. Student fallback lookup if not directly found
+    if (tokens.length === 0) {
+      const sRes = await executeTursoQuery(
+        `SELECT apt.token FROM app_push_tokens apt
+         JOIN students s ON (apt.admission_no = s.admissionNo OR apt.admission_no = s.phone OR apt.admission_no = CAST(s.id AS TEXT))
+         WHERE s.admissionNo = ? OR s.id = ? OR s.phone = ?
+         ORDER BY apt.id DESC LIMIT 10`,
+        [sReceiverId, rawId, sReceiverId]
+      );
+      const sRows = sRes?.results?.[0]?.response?.result?.rows || [];
+      const sTokens = sRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken'));
+      tokens = [...new Set([...tokens, ...sTokens])];
+    }
+
+    // 3. Teacher fallback lookup if not directly found
+    if (tokens.length === 0) {
+      const tRes = await executeTursoQuery(
+        `SELECT apt.token FROM app_push_tokens apt
+         JOIN teachers t ON (apt.admission_no = CAST(t.id AS TEXT) OR apt.admission_no = t.phone OR apt.admission_no = ('EMP-' || t.id))
+         WHERE CAST(t.id AS TEXT) = ? OR t.phone = ? OR ('EMP-' || t.id) = ?
+         ORDER BY apt.id DESC LIMIT 10`,
+        [rawId, sReceiverId, sReceiverId]
+      );
+      const tRows = tRes?.results?.[0]?.response?.result?.rows || [];
+      const tTokens = tRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken'));
+      tokens = [...new Set([...tokens, ...tTokens])];
+    }
+
+    if (tokens.length === 0) {
+      console.log(`[Render VoIP] No push token found for receiver: ${sReceiverId} (${receiverName})`);
+      return;
+    }
+
+    console.log(`[Render VoIP] Sending call push to ${tokens.length} token(s) for ${receiverName}`);
 
     const messages = tokens.map(token => ({
       to: token,
@@ -122,6 +158,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       channelId: 'calls',
       priority: 'high',
       badge: 1,
+      ttl: 60,
       data: {
         type: 'INCOMING_CALL',
         callId: callId,
