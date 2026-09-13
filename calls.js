@@ -248,7 +248,17 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
                 message: {
                   token: token,
                   android: {
-                    priority: 'high'
+                    priority: 'HIGH',
+                    notification: {
+                      channel_id: 'calls',
+                      notification_priority: 'PRIORITY_MAX',
+                      sound: 'default',
+                      visibility: 'PUBLIC'
+                    }
+                  },
+                  notification: {
+                    title: `${callerName}`,
+                    body: `📞 Incoming voice call`
                   },
                   data: {
                     title: `${callerName}`,
@@ -562,8 +572,8 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
     }
   }
 
-  // 2. Fallback DB lookup if activeCallId requested but not in RAM
-  if (sActiveCallId && !activeCall) {
+  // 2. Authoritative DB lookup if activeCallId requested (refresh from DB if not in RAM or still ringing or missing answer)
+  if (sActiveCallId && (!activeCall || activeCall.status === 'ringing' || !activeCall.answer_sdp)) {
     try {
       const res = await executeTursoQuery(
         `SELECT * FROM app_voice_calls WHERE call_id = ? LIMIT 1`,
