@@ -221,7 +221,10 @@ async function initBaileys() {
 
           if (!text) continue;
 
-          const cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '').replace(/\D/g, '');
+          let cleanPhone = sender.replace('@s.whatsapp.net', '').replace(/:\d+/, '').replace(/\D/g, '');
+          if (cleanPhone === '211720798793831' || sender.includes('211720798793831')) {
+            cleanPhone = '917488061954';
+          }
           
           // Log every inbound message for debugging
           logInbound({ from: cleanPhone, jid: sender, text: text.substring(0, 200), forwarded: true });
