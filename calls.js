@@ -238,7 +238,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
         if (!accessToken) return;
         for (const token of fcmTokens) {
           try {
-            await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
+            const fcmRes = await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
               method: 'POST',
               headers: {
                 'Authorization': 'Bearer ' + accessToken,
@@ -274,7 +274,15 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
                 }
               })
             });
-            console.log(`[FCM v1] Direct call push sent to token ${token.substring(0, 15)}...`);
+            if (fcmRes.status === 200) {
+              console.log(`[FCM v1] Direct call push sent to token ${token.substring(0, 15)}...`);
+            } else if (fcmRes.status === 404) {
+              console.log(`[FCM v1] Dead token 404 -> removing ${token.substring(0, 15)}...`);
+              executeTursoQuery('DELETE FROM app_push_tokens WHERE token = ?', [token]).catch(() => {});
+            } else {
+              const errTxt = await fcmRes.text();
+              console.log(`[FCM v1] Response ${fcmRes.status}:`, errTxt);
+            }
           } catch (e) {
             console.log('[FCM v1] Push error:', e.message);
           }
