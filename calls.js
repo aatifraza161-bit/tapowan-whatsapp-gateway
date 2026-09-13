@@ -96,10 +96,9 @@ function isTeacherOrStaff(role) {
 /**
  * Send High-Priority Incoming Call Push Notification via Expo
  */
-async function sendIncomingCallPush({ receiverId, receiverName, callerName, callerRole, callerAvatar, callId }) {
+async function sendIncomingCallPush({ receiverId, receiverName, callerId, callerName, callerRole, callerAvatar, callId }) {
   try {
     const sReceiverId = String(receiverId || '').trim();
-    const sReceiverName = String(receiverName || '').trim();
     const rawId = sReceiverId.replace('EMP-', '');
 
     const res = await executeTursoQuery(
@@ -107,11 +106,8 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerName, call
        WHERE admission_no = ? 
           OR admission_no = ? 
           OR admission_no = ?
-          OR admission_no LIKE ?
-          OR student_name = ?
-          OR student_name LIKE ?
-       ORDER BY id DESC LIMIT 20`,
-      [sReceiverId, rawId, `EMP-${rawId}`, `%${rawId}%`, sReceiverName, `%${sReceiverName}%`]
+       ORDER BY id DESC LIMIT 10`,
+      [sReceiverId, rawId, `EMP-${rawId}`]
     );
 
     const rows = res?.results?.[0]?.response?.result?.rows || [];
@@ -129,7 +125,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerName, call
       data: {
         type: 'INCOMING_CALL',
         callId: callId,
-        callerId: sReceiverId,
+        callerId: String(callerId || ''),
         callerName: callerName,
         callerRole: callerRole,
         callerAvatar: callerAvatar
@@ -197,6 +193,7 @@ async function initiateCall({ callerId, callerName, callerRole, callerAvatar, re
   sendIncomingCallPush({
     receiverId: callRecord.receiver_id,
     receiverName: callRecord.receiver_name,
+    callerId: callRecord.caller_id,
     callerName: callRecord.caller_name,
     callerRole: callRecord.caller_role,
     callerAvatar: callRecord.caller_avatar,
@@ -326,7 +323,7 @@ async function endCall({ callId, durationSec = 0 }) {
     durationSec || 0, callId
   ]).catch(() => {});
 
-  setTimeout(() => activeCallsMap.delete(callId), 30000);
+  setTimeout(() => activeCallsMap.delete(callId), 15000);
 
   return { ok: true, message: "Call ended successfully" };
 }
@@ -334,13 +331,13 @@ async function endCall({ callId, durationSec = 0 }) {
 /**
  * 5. Poll Calls for User (Instant In-Memory Lookup on Render)
  */
-async function pollUserCalls({ userId, userRole, className, admissionNo, phone, fullName }) {
+async function pollUserCalls({ userId, userRole, className, admissionNo, phone, fullName, activeCallId }) {
   if (!userId && !admissionNo && !phone) return { ok: false, status: 400, error: "Missing userId" };
 
   const sUserId = String(userId || '').trim();
   const sAdm = String(admissionNo || '').trim();
   const sPhone = String(phone || '').trim();
-  const sName = String(fullName || '').trim().toLowerCase();
+  const sActiveCallId = String(activeCallId || '').trim();
 
   const possibleIds = new Set([
     sUserId,
@@ -354,35 +351,42 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
 
   let incomingCall = null;
   let activeCall = null;
+  const nowMs = Date.now();
 
   // 1. Instant RAM Lookup
   for (const call of activeCallsMap.values()) {
     const recId = String(call.receiver_id || '').trim();
-    const recName = String(call.receiver_name || '').trim().toLowerCase();
     const callerId = String(call.caller_id || '').trim();
 
-    const isReceiver = possibleIds.has(recId) || (sName && recName && (recName === sName || recName.includes(sName) || sName.includes(recName)));
+    const isReceiver = possibleIds.has(recId);
     const isCaller = possibleIds.has(callerId);
 
-    if (isReceiver && call.status === 'ringing' && !incomingCall) {
+    let ageMs = 0;
+    if (call.created_at) {
+      ageMs = nowMs - new Date(call.created_at).getTime();
+    }
+
+    // Incoming call: strictly receiver only, ringing status, age < 45s, not self
+    if (isReceiver && !isCaller && call.status === 'ringing' && ageMs < 45000 && !incomingCall) {
       incomingCall = call;
     }
-    if ((isCaller || isReceiver) && (call.status === 'connected' || call.status === 'ringing' || call.status === 'ended' || call.status === 'declined') && !activeCall) {
+
+    // Active call:
+    if (sActiveCallId && call.call_id === sActiveCallId) {
       activeCall = call;
+    } else if (!sActiveCallId && (isCaller || isReceiver)) {
+      if ((call.status === 'connected' || call.status === 'ringing') && ageMs < 120000 && !activeCall) {
+        activeCall = call;
+      }
     }
   }
 
-  // 2. Fallback DB lookup if not in RAM
-  if (!incomingCall && !activeCall) {
+  // 2. Fallback DB lookup if activeCallId requested but not in RAM
+  if (sActiveCallId && !activeCall) {
     try {
-      const idArray = Array.from(possibleIds);
-      const placeholders = idArray.map(() => '?').join(',');
       const res = await executeTursoQuery(
-        `SELECT * FROM app_voice_calls 
-         WHERE (receiver_id IN (${placeholders}) OR caller_id IN (${placeholders}) OR receiver_name LIKE ? OR caller_name LIKE ?)
-           AND status IN ('ringing', 'connected')
-         ORDER BY id DESC LIMIT 1`,
-        [...idArray, ...idArray, `%${sName || sUserId}%`, `%${sName || sUserId}%`]
+        `SELECT * FROM app_voice_calls WHERE call_id = ? LIMIT 1`,
+        [sActiveCallId]
       );
       const rows = res?.results?.[0]?.response?.result?.rows || [];
       if (rows.length > 0) {
@@ -390,14 +394,39 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
         const row = {};
         cols.forEach((col, idx) => { row[col] = rows[0][idx]?.value; });
         activeCallsMap.set(row.call_id, row);
-        const isReceiver = possibleIds.has(String(row.receiver_id));
-        if (isReceiver && row.status === 'ringing') incomingCall = row;
         activeCall = row;
       }
     } catch (e) {}
   }
 
-  // 3. Check for active class group voice room
+  // 3. Fallback DB lookup for ringing incoming calls if none in RAM
+  if (!incomingCall && !activeCall && !sActiveCallId) {
+    try {
+      const idArray = Array.from(possibleIds);
+      const placeholders = idArray.map(() => '?').join(',');
+      const res = await executeTursoQuery(
+        `SELECT * FROM app_voice_calls 
+         WHERE receiver_id IN (${placeholders})
+           AND status = 'ringing'
+         ORDER BY id DESC LIMIT 1`,
+        [...idArray]
+      );
+      const rows = res?.results?.[0]?.response?.result?.rows || [];
+      if (rows.length > 0) {
+        const cols = res.results[0].response.result.cols.map(c => c.name);
+        const row = {};
+        cols.forEach((col, idx) => { row[col] = rows[0][idx]?.value; });
+        const callAge = nowMs - new Date(row.created_at || row.updated_at || Date.now()).getTime();
+        if (callAge < 45000 && !possibleIds.has(String(row.caller_id))) {
+          activeCallsMap.set(row.call_id, row);
+          incomingCall = row;
+          activeCall = row;
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 4. Check for active class group voice room
   let activeClassRoom = null;
   if (className || userRole) {
     for (const room of activeRoomsMap.values()) {
