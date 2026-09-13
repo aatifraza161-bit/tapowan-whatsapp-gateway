@@ -255,10 +255,15 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
                       sound: 'default',
                       channel_id: 'calls',
                       notification_priority: 'PRIORITY_MAX',
-                      visibility: 'PUBLIC'
+                      visibility: 'PUBLIC',
+                      tag: 'call_notification',
+                      click_action: 'OPEN_CALL'
                     },
                     data: {
                       type: 'INCOMING_CALL',
+                      categoryId: 'call_incoming',
+                      categoryIdentifier: 'call_incoming',
+                      _category: 'call_incoming',
                       callId: callId,
                       callerId: String(callerId || ''),
                       callerName: callerName,
@@ -287,10 +292,14 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
         body: `📞 Incoming voice call`,
         channelId: 'calls',
         priority: 'high',
+        categoryId: 'call_incoming',
+        categoryIdentifier: 'call_incoming',
         badge: 1,
         ttl: 60,
         data: {
           type: 'INCOMING_CALL',
+          categoryId: 'call_incoming',
+          categoryIdentifier: 'call_incoming',
           callId: callId,
           callerId: String(callerId || ''),
           callerName: callerName,
