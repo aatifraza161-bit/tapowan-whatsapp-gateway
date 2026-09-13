@@ -99,58 +99,88 @@ function isTeacherOrStaff(role) {
 async function sendIncomingCallPush({ receiverId, receiverName, callerId, callerName, callerRole, callerAvatar, callId }) {
   try {
     const sReceiverId = String(receiverId || '').trim();
-    const rawId = sReceiverId.replace('EMP-', '');
+    const rawId = sReceiverId.replace('EMP-', '').trim();
+    let tokens = [];
 
-    // 1. Direct search in app_push_tokens
+    // 1. Direct match in app_push_tokens (admissionNo, raw ID, EMP-id)
     const res = await executeTursoQuery(
       `SELECT token FROM app_push_tokens 
        WHERE admission_no = ? 
           OR admission_no = ? 
           OR admission_no = ?
+          OR admission_no = ?
           OR admission_no LIKE ?
        ORDER BY id DESC LIMIT 10`,
-      [sReceiverId, rawId, `EMP-${rawId}`, `%${rawId}%`]
+      [sReceiverId, rawId, `EMP-${rawId}`, `EMP-${sReceiverId}`, `%${rawId}%`]
     );
+    const rows = res?.results?.[0]?.response?.result?.rows || [];
+    tokens.push(...rows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
 
-    let rows = res?.results?.[0]?.response?.result?.rows || [];
-    let tokens = [...new Set(rows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')))];
+    // 2. Teacher fallback lookup (id, phone, employeeNo, fullName)
+    const tRes = await executeTursoQuery(
+      `SELECT apt.token FROM app_push_tokens apt
+       JOIN teachers t ON (
+         apt.admission_no = CAST(t.id AS TEXT) 
+         OR apt.admission_no = ('EMP-' || t.id)
+         OR apt.admission_no = t.phone
+         OR apt.admission_no = t.employeeNo
+         OR apt.student_name = t.fullName
+       )
+       WHERE CAST(t.id AS TEXT) = ? 
+          OR ('EMP-' || t.id) = ? 
+          OR t.phone = ? 
+          OR t.employeeNo = ? 
+          OR t.fullName = ?
+          OR t.fullName LIKE ?
+       ORDER BY apt.id DESC LIMIT 10`,
+      [rawId, sReceiverId, sReceiverId, sReceiverId, receiverName || '', `%${receiverName || ''}%`]
+    );
+    const tRows = tRes?.results?.[0]?.response?.result?.rows || [];
+    tokens.push(...tRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
 
-    // 2. Student fallback lookup if not directly found
-    if (tokens.length === 0) {
-      const sRes = await executeTursoQuery(
-        `SELECT apt.token FROM app_push_tokens apt
-         JOIN students s ON (apt.admission_no = s.admissionNo OR apt.admission_no = s.phone OR apt.admission_no = CAST(s.id AS TEXT))
-         WHERE s.admissionNo = ? OR s.id = ? OR s.phone = ?
-         ORDER BY apt.id DESC LIMIT 10`,
-        [sReceiverId, rawId, sReceiverId]
+    // 3. Student fallback lookup (admissionNo, phone, id, fullName)
+    const sRes = await executeTursoQuery(
+      `SELECT apt.token FROM app_push_tokens apt
+       JOIN students s ON (
+         apt.admission_no = s.admissionNo 
+         OR apt.admission_no = s.phone 
+         OR apt.admission_no = s.phone1
+         OR apt.admission_no = CAST(s.id AS TEXT)
+         OR apt.student_name = s.fullName
+       )
+       WHERE s.admissionNo = ? 
+          OR s.admissionNo = ?
+          OR CAST(s.id AS TEXT) = ? 
+          OR s.phone = ? 
+          OR s.phone1 = ?
+          OR s.fullName = ?
+       ORDER BY apt.id DESC LIMIT 10`,
+      [sReceiverId, rawId, rawId, sReceiverId, sReceiverId, receiverName || '']
+    );
+    const sRows = sRes?.results?.[0]?.response?.result?.rows || [];
+    tokens.push(...sRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
+
+    // 4. Fallback search by receiverName in student_name if still empty
+    if (tokens.length === 0 && receiverName && receiverName !== 'Receiver' && receiverName !== 'School Contact') {
+      const nameRes = await executeTursoQuery(
+        `SELECT token FROM app_push_tokens 
+         WHERE student_name LIKE ?
+         ORDER BY id DESC LIMIT 5`,
+        [`%${receiverName}%`]
       );
-      const sRows = sRes?.results?.[0]?.response?.result?.rows || [];
-      const sTokens = sRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken'));
-      tokens = [...new Set([...tokens, ...sTokens])];
+      const nameRows = nameRes?.results?.[0]?.response?.result?.rows || [];
+      tokens.push(...nameRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
     }
 
-    // 3. Teacher fallback lookup if not directly found
-    if (tokens.length === 0) {
-      const tRes = await executeTursoQuery(
-        `SELECT apt.token FROM app_push_tokens apt
-         JOIN teachers t ON (apt.admission_no = CAST(t.id AS TEXT) OR apt.admission_no = t.phone OR apt.admission_no = ('EMP-' || t.id))
-         WHERE CAST(t.id AS TEXT) = ? OR t.phone = ? OR ('EMP-' || t.id) = ?
-         ORDER BY apt.id DESC LIMIT 10`,
-        [rawId, sReceiverId, sReceiverId]
-      );
-      const tRows = tRes?.results?.[0]?.response?.result?.rows || [];
-      const tTokens = tRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken'));
-      tokens = [...new Set([...tokens, ...tTokens])];
-    }
-
-    if (tokens.length === 0) {
+    const uniqueTokens = [...new Set(tokens)];
+    if (uniqueTokens.length === 0) {
       console.log(`[Render VoIP] No push token found for receiver: ${sReceiverId} (${receiverName})`);
       return;
     }
 
-    console.log(`[Render VoIP] Sending call push to ${tokens.length} token(s) for ${receiverName}`);
+    console.log(`[Render VoIP] Sending call push to ${uniqueTokens.length} token(s) for ${receiverName}`);
 
-    const messages = tokens.map(token => ({
+    const messages = uniqueTokens.map(token => ({
       to: token,
       sound: 'default',
       title: `📞 Incoming Voice Call: ${callerName}`,
