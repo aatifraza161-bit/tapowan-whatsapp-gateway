@@ -250,8 +250,8 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
                   android: {
                     priority: 'high',
                     notification: {
-                      title: `📞 Incoming Voice Call: ${callerName}`,
-                      body: `${callerRole === 'teacher' ? '👨‍🏫 Faculty Member' : '🎓 Student'} is calling you. Tap to open and answer.`,
+                      title: `${callerName}`,
+                      body: `📞 Incoming voice call`,
                       sound: 'default',
                       channel_id: 'calls',
                       notification_priority: 'PRIORITY_MAX',
@@ -283,8 +283,8 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       const messages = expoTokens.map(token => ({
         to: token,
         sound: 'default',
-        title: `📞 Incoming Voice Call: ${callerName}`,
-        body: `${callerRole === 'teacher' ? '👨‍🏫 Faculty Member' : '🎓 Student'} is calling you. Tap to open and answer.`,
+        title: `${callerName}`,
+        body: `📞 Incoming voice call`,
         channelId: 'calls',
         priority: 'high',
         badge: 1,
