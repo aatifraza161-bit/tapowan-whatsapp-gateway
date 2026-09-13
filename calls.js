@@ -248,28 +248,24 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
                 message: {
                   token: token,
                   android: {
-                    priority: 'high',
-                    notification: {
-                      title: `${callerName}`,
-                      body: `📞 Incoming voice call`,
-                      sound: 'default',
-                      channel_id: 'calls',
-                      notification_priority: 'PRIORITY_MAX',
-                      visibility: 'PUBLIC',
-                      tag: 'call_notification',
-                      click_action: 'OPEN_CALL'
-                    },
-                    data: {
-                      type: 'INCOMING_CALL',
-                      categoryId: 'call_incoming',
-                      categoryIdentifier: 'call_incoming',
-                      _category: 'call_incoming',
-                      callId: callId,
-                      callerId: String(callerId || ''),
-                      callerName: callerName,
-                      callerRole: callerRole,
-                      callerAvatar: callerAvatar || ''
-                    }
+                    priority: 'high'
+                  },
+                  data: {
+                    title: `${callerName}`,
+                    message: `📞 Incoming voice call`,
+                    body: `📞 Incoming voice call`,
+                    channelId: 'calls',
+                    categoryId: 'call_incoming',
+                    categoryIdentifier: 'call_incoming',
+                    _category: 'call_incoming',
+                    type: 'INCOMING_CALL',
+                    callId: callId,
+                    callerId: String(callerId || ''),
+                    callerName: callerName,
+                    callerRole: callerRole,
+                    callerAvatar: callerAvatar || '',
+                    sound: 'default',
+                    vibrate: '[0, 800, 500, 800, 500, 800]'
                   }
                 }
               })
