@@ -671,9 +671,124 @@ app.post('/api/send-bulk', checkAuth, async (req, res) => {
   })();
 });
 
+const {
+  initiateCall,
+  respondCall,
+  sendCallSignal,
+  endCall,
+  pollUserCalls,
+  createGroupRoom,
+  joinGroupRoom,
+  leaveGroupRoom,
+  endGroupRoom,
+  sendGroupSignal,
+  pollGroupRoom
+} = require('./calls');
+
+// ── VOIP CALLS & CLASSROOM AUDIO ROOMS ROUTING (Render 24/7 Persistent Server) ──
+app.post('/api/calls/initiate', async (req, res) => {
+  try {
+    const result = await initiateCall(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/respond', async (req, res) => {
+  try {
+    const result = await respondCall(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/signal', async (req, res) => {
+  try {
+    const result = await sendCallSignal(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/end', async (req, res) => {
+  try {
+    const result = await endCall(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/calls/poll', async (req, res) => {
+  try {
+    const result = await pollUserCalls(req.query || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/group/create', async (req, res) => {
+  try {
+    const result = await createGroupRoom(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/group/join', async (req, res) => {
+  try {
+    const result = await joinGroupRoom(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/group/leave', async (req, res) => {
+  try {
+    const result = await leaveGroupRoom(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/group/end', async (req, res) => {
+  try {
+    const result = await endGroupRoom(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/calls/group/signal', async (req, res) => {
+  try {
+    const result = await sendGroupSignal(req.body || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get('/api/calls/group/poll', async (req, res) => {
+  try {
+    const result = await pollGroupRoom(req.query || {});
+    res.status(result.status || (result.ok ? 200 : 400)).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log('====================================================');
-  console.log(`🚀 Tapowan Protected WhatsApp Gateway running on port ${PORT}`);
+  console.log(`🚀 Tapowan WhatsApp Gateway & VoIP Signaling Server on port ${PORT}`);
+  console.log('🎙️ Real-Time WebRTC Call Server: ACTIVE');
   console.log('🔒 Admin PIN Protection: ENABLED');
   console.log('⚡ Anti-Sleep Keep-Alive: ACTIVE');
   console.log('☁️ Turso Session Sync: ACTIVE');
