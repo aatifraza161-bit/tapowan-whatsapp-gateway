@@ -93,8 +93,59 @@ function isTeacherOrStaff(role) {
   return r === 'teacher' || r === 'staff' || r === 'faculty' || r === 'principal' || r === 'administrator' || r === 'admin';
 }
 
+const crypto = require('crypto');
+
+const FCM_SERVICE_ACCOUNT = {
+  project_id: "tps-app-8dde5",
+  client_email: "firebase-adminsdk-fbsvc@tps-app-8dde5.iam.gserviceaccount.com",
+  private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDd+EiteRU4Dff3\nmNGqE5+DGkYKV2pCIGXIhV/eeVd2xosfTQKFpJb6s7udY1Lhpsu1sHyscKK6ZZFf\nfPrtF0GqWKZcewM27TMEgsx/o6f+WQSYx+d7jpf96ihJWPE4mIEBfhzeamJpRw21\ng03JUh6VyTyNXL0qNCmMGptCic7YvOUu7RIE0jopZYkcD0XhFNvhtdXi4txUpUXx\nbFqqL9HMcp4yMXvK3e9bJu0AFwR1izeKWcl37rjCJsfx86EGd7GDcKwp0+JebCtS\nwZIveQ1Pfbkdtgq3scwdwBlqfjoSLrDTwg0KxsoAzKPy0UJdvk7p0zU7gnHA7MSP\n6TsssoTTAgMBAAECggEAOnayQcqiDZ0UQkkkdAzuFxxc9U1X5endlSaX/SNtp5Gc\nxBZHA0c6IvcjA83M3zVM82J0PAEAw2KMGx/ygW7+My1dR/94dcedB+OhlD7ZORNe\nNBV3AWKp4s2BZexAwLzeQbPjS6uulvcJg9T9MHjqKF6UDdGu20ZY6Rd67FgavJfq\nY2SIYmHAztIwGj/EnShx8M6P7UbVdMgCXvE5dZeO9M2oY1Ts5Az9FUxOY5yT5OH/\nEhrLFeGrzucyZaTrNU84c63uK9p2yb8jfeNNmIeSYhEvRLboLDgsHTnO5n0+a4TJ\n5hMrV7XA1PxjZVAxacpZMsoy3Bj1US+4gFTcL2rM2QKBgQD9DRjNm1vFNOm0znXk\nsF0+eM6npkhlOOXjwwFZuWKP2Uld/XQw0GHiw8bwtQW8N4Ugk22OU2aMmQTJPy68\ntleT1KWDqa6jKBysUki5Qt1numLQn6sAV6qZw5n3LpdgCIQUNioqm4SXXjsbN0WA\n3FfnwH3Xg2dR2QSyGdz5l5VGKQKBgQDgjncU9mHFy8frV/IKILiyMPYtqwsut9OJ\nQss/uL+5URUMbqYMxX8M5+onI+whmBW1BWoU2swd02Gz/5wSku5t438G7VWfXwll\nMjAFgBjEadQBTFXgvG7buFyxqD7Iw3ZXnEPTS1Rud0ZBWXgfxQREuPhiAh0irVUH\nyiegQAX6mwKBgAxcFGcOfIgAUp3rK6T03EkN24IixAx1n/zk7G72eBLwmP3HQGKV\n+wH5cAEXxmTwDUePC93UwwCBBNPTizPacCKfU0pAAnCjp+rexgCOfIPxfZwVAGQu\n4/1IqX+CPhCJufHGx353RB2kk5x7saBeosiGBV9+YpCD2g/c5YcnWTopAoGBAK+/\nUHvbiRIhN0p9/jTm/yaXI1UCtTHPNYQL/r7UfVkwmGSuhM8iExmquJwBhWGVgge3\nQRspUu9U7PbPavsue+UNU/G79nNREi1dZjAn3Tp8CS0q7VuCntDgLcvtfZXrRMe0\nyXCpWF9MgnPK7jUPIRQYIG20cdEeD5qVIQZOlV9ZAoGBAKVUTqU8VKW4OLhI3umU\nfFiePOoZUcHqB/UFWhEPWNROSRVb7kZvkwLJ4jBD1zD2t2ZT8DXxENPwTLVqo3dN\ngLj3HfrzZAwUeMompY/sVty376F15mai+bQUX7yTgY0ah4XszW90hxxNkDyudoac\nRrhmGbNqG5Yzjyqbf52/0Z/d\n-----END PRIVATE KEY-----\n",
+  token_uri: "https://oauth2.googleapis.com/token"
+};
+
+let cachedFcmToken = null;
+let cachedFcmTokenExpiry = 0;
+
+async function getFcmAccessToken() {
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedFcmToken && cachedFcmTokenExpiry > now + 60) {
+    return cachedFcmToken;
+  }
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const claimSet = {
+    iss: FCM_SERVICE_ACCOUNT.client_email,
+    scope: 'https://www.googleapis.com/auth/firebase.messaging',
+    aud: FCM_SERVICE_ACCOUNT.token_uri,
+    exp: now + 3600,
+    iat: now
+  };
+
+  const b64Header = Buffer.from(JSON.stringify(header)).toString('base64url');
+  const b64Claim = Buffer.from(JSON.stringify(claimSet)).toString('base64url');
+  const signatureInput = `${b64Header}.${b64Claim}`;
+
+  const signer = crypto.createSign('RSA-SHA256');
+  signer.update(signatureInput);
+  const signature = signer.sign(FCM_SERVICE_ACCOUNT.private_key, 'base64url');
+
+  const jwt = `${signatureInput}.${signature}`;
+
+  const res = await fetch(FCM_SERVICE_ACCOUNT.token_uri, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
+  });
+
+  const data = await res.json();
+  if (data.access_token) {
+    cachedFcmToken = data.access_token;
+    cachedFcmTokenExpiry = now + (data.expires_in || 3600);
+    return cachedFcmToken;
+  }
+  return null;
+}
+
 /**
- * Send High-Priority Incoming Call Push Notification via Expo
+ * Send High-Priority Incoming Call Push Notification via Direct Firebase FCM v1 & Expo
  */
 async function sendIncomingCallPush({ receiverId, receiverName, callerId, callerName, callerRole, callerAvatar, callId }) {
   try {
@@ -107,14 +158,14 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       `SELECT token FROM app_push_tokens 
        WHERE admission_no = ? 
           OR admission_no = ? 
-          OR admission_no = ?
+          OR admission_no = ? 
           OR admission_no = ?
           OR admission_no LIKE ?
        ORDER BY id DESC LIMIT 10`,
       [sReceiverId, rawId, `EMP-${rawId}`, `EMP-${sReceiverId}`, `%${rawId}%`]
     );
     const rows = res?.results?.[0]?.response?.result?.rows || [];
-    tokens.push(...rows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
+    tokens.push(...rows.map(r => r[0]?.value).filter(Boolean));
 
     // 2. Teacher fallback lookup (id, phone, employeeNo, fullName)
     const tRes = await executeTursoQuery(
@@ -136,7 +187,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       [rawId, sReceiverId, sReceiverId, sReceiverId, receiverName || '', `%${receiverName || ''}%`]
     );
     const tRows = tRes?.results?.[0]?.response?.result?.rows || [];
-    tokens.push(...tRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
+    tokens.push(...tRows.map(r => r[0]?.value).filter(Boolean));
 
     // 3. Student fallback lookup (admissionNo, phone, id, fullName)
     const sRes = await executeTursoQuery(
@@ -158,7 +209,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       [sReceiverId, rawId, rawId, sReceiverId, sReceiverId, receiverName || '']
     );
     const sRows = sRes?.results?.[0]?.response?.result?.rows || [];
-    tokens.push(...sRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
+    tokens.push(...sRows.map(r => r[0]?.value).filter(Boolean));
 
     // 4. Fallback search by receiverName in student_name if still empty
     if (tokens.length === 0 && receiverName && receiverName !== 'Receiver' && receiverName !== 'School Contact') {
@@ -169,7 +220,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
         [`%${receiverName}%`]
       );
       const nameRows = nameRes?.results?.[0]?.response?.result?.rows || [];
-      tokens.push(...nameRows.map(r => r[0]?.value).filter(t => t && t.startsWith('ExponentPushToken')));
+      tokens.push(...nameRows.map(r => r[0]?.value).filter(Boolean));
     }
 
     const uniqueTokens = [...new Set(tokens)];
@@ -178,37 +229,87 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       return;
     }
 
-    console.log(`[Render VoIP] Sending call push to ${uniqueTokens.length} token(s) for ${receiverName}`);
+    console.log(`[Render VoIP] Dispatching call push to ${uniqueTokens.length} token(s) for ${receiverName}`);
 
-    const messages = uniqueTokens.map(token => ({
-      to: token,
-      sound: 'default',
-      title: `📞 Incoming Voice Call: ${callerName}`,
-      body: `${callerRole === 'teacher' ? '👨‍🏫 Faculty Member' : '🎓 Student'} is calling you. Tap to open and answer.`,
-      channelId: 'calls',
-      priority: 'high',
-      badge: 1,
-      ttl: 60,
-      data: {
-        type: 'INCOMING_CALL',
-        callId: callId,
-        callerId: String(callerId || ''),
-        callerName: callerName,
-        callerRole: callerRole,
-        callerAvatar: callerAvatar
-      },
-      _displayInForeground: true
-    }));
+    // Direct Google Firebase FCM v1 Delivery for native Android tokens
+    const fcmTokens = uniqueTokens.filter(t => !t.startsWith('ExponentPushToken'));
+    if (fcmTokens.length > 0) {
+      getFcmAccessToken().then(async (accessToken) => {
+        if (!accessToken) return;
+        for (const token of fcmTokens) {
+          try {
+            await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
+              method: 'POST',
+              headers: {
+                'Authorization': 'Bearer ' + accessToken,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                message: {
+                  token: token,
+                  android: {
+                    priority: 'high',
+                    notification: {
+                      title: `📞 Incoming Voice Call: ${callerName}`,
+                      body: `${callerRole === 'teacher' ? '👨‍🏫 Faculty Member' : '🎓 Student'} is calling you. Tap to open and answer.`,
+                      sound: 'default',
+                      channel_id: 'calls',
+                      notification_priority: 'PRIORITY_MAX',
+                      visibility: 'PUBLIC'
+                    },
+                    data: {
+                      type: 'INCOMING_CALL',
+                      callId: callId,
+                      callerId: String(callerId || ''),
+                      callerName: callerName,
+                      callerRole: callerRole,
+                      callerAvatar: callerAvatar || ''
+                    }
+                  }
+                }
+              })
+            });
+            console.log(`[FCM v1] Direct call push sent to token ${token.substring(0, 15)}...`);
+          } catch (e) {
+            console.log('[FCM v1] Push error:', e.message);
+          }
+        }
+      }).catch(e => console.log('[FCM v1] Token error:', e.message));
+    }
 
-    await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Accept-encoding': 'gzip, deflate',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(messages),
-    });
+    // Expo Push Service Delivery for ExponentPushTokens
+    const expoTokens = uniqueTokens.filter(t => t.startsWith('ExponentPushToken'));
+    if (expoTokens.length > 0) {
+      const messages = expoTokens.map(token => ({
+        to: token,
+        sound: 'default',
+        title: `📞 Incoming Voice Call: ${callerName}`,
+        body: `${callerRole === 'teacher' ? '👨‍🏫 Faculty Member' : '🎓 Student'} is calling you. Tap to open and answer.`,
+        channelId: 'calls',
+        priority: 'high',
+        badge: 1,
+        ttl: 60,
+        data: {
+          type: 'INCOMING_CALL',
+          callId: callId,
+          callerId: String(callerId || ''),
+          callerName: callerName,
+          callerRole: callerRole,
+          callerAvatar: callerAvatar
+        },
+        _displayInForeground: true
+      }));
+
+      fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-encoding': 'gzip, deflate',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(messages),
+      }).catch(() => {});
+    }
   } catch (err) {
     console.log('[Render VoIP] Push notification error:', err.message);
   }
