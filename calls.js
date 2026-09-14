@@ -175,16 +175,18 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
          OR apt.admission_no = ('EMP-' || t.id)
          OR apt.admission_no = t.phone
          OR apt.admission_no = t.employeeNo
+         OR apt.admission_no = ('EMP-' || t.employeeNo)
          OR apt.student_name = t.fullName
        )
        WHERE CAST(t.id AS TEXT) = ? 
           OR ('EMP-' || t.id) = ? 
           OR t.phone = ? 
           OR t.employeeNo = ? 
+          OR ('EMP-' || t.employeeNo) = ?
           OR t.fullName = ?
           OR t.fullName LIKE ?
        ORDER BY apt.id DESC LIMIT 10`,
-      [rawId, sReceiverId, sReceiverId, sReceiverId, receiverName || '', `%${receiverName || ''}%`]
+      [rawId, sReceiverId, sReceiverId, rawId, sReceiverId, receiverName || '', `%${receiverName || ''}%`]
     );
     const tRows = tRes?.results?.[0]?.response?.result?.rows || [];
     tokens.push(...tRows.map(r => r[0]?.value).filter(Boolean));
@@ -238,6 +240,27 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
         if (!accessToken) return;
         for (const token of fcmTokens) {
           try {
+            const fcmData = {
+              title: `${callerName}`,
+              message: `📞 Incoming voice call`,
+              body: `📞 Incoming voice call`,
+              channelId: 'calls',
+              categoryId: 'call_incoming',
+              categoryIdentifier: 'call_incoming',
+              _category: 'call_incoming',
+              type: 'INCOMING_CALL',
+              callId: callId,
+              callerId: String(callerId || ''),
+              callerName: callerName,
+              callerRole: callerRole,
+              callerAvatar: callerAvatar || '',
+              sound: 'default',
+              vibrate: '[0, 800, 500, 800, 500, 800]'
+            };
+            if (offerSdp && typeof offerSdp === 'string' && offerSdp.length < 3200) {
+              fcmData.offerSdp = offerSdp;
+            }
+
             const fcmRes = await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
               method: 'POST',
               headers: {
@@ -251,23 +274,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
                     priority: 'HIGH',
                     ttl: '60s'
                   },
-                  data: {
-                    title: `${callerName}`,
-                    message: `📞 Incoming voice call`,
-                    body: `📞 Incoming voice call`,
-                    channelId: 'calls',
-                    categoryId: 'call_incoming',
-                    categoryIdentifier: 'call_incoming',
-                    _category: 'call_incoming',
-                    type: 'INCOMING_CALL',
-                    callId: callId,
-                    callerId: String(callerId || ''),
-                    callerName: callerName,
-                    callerRole: callerRole,
-                    callerAvatar: callerAvatar || '',
-                    sound: 'default',
-                    vibrate: '[0, 800, 500, 800, 500, 800]'
-                  }
+                  data: fcmData
                 }
               })
             });
@@ -310,7 +317,8 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
           callerId: String(callerId || ''),
           callerName: callerName,
           callerRole: callerRole,
-          callerAvatar: callerAvatar
+          callerAvatar: callerAvatar,
+          ...(offerSdp && typeof offerSdp === 'string' && offerSdp.length < 3200 ? { offerSdp } : {})
         },
         _displayInForeground: true
       }));
@@ -589,6 +597,42 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
     sAdm.replace('EMP-', ''),
     `EMP-${sAdm.replace('EMP-', '')}`
   ].filter(Boolean));
+
+  // Expand teacher and student aliases into possibleIds so receiver matches regardless of ID format
+  const rawId = sUserId.replace('EMP-', '').trim();
+  if (rawId) {
+    try {
+      const tLookup = await executeTursoQuery(
+        `SELECT id, employeeNo, phone, fullName FROM teachers 
+         WHERE id = ? OR employeeNo = ? OR phone = ? OR fullName = ? LIMIT 1`,
+        [rawId, rawId, sPhone || rawId, fullName || '']
+      );
+      const tRow = tLookup?.results?.[0]?.response?.result?.rows?.[0];
+      if (tRow) {
+        const tId = String(tRow[0]?.value || '');
+        const tEmpNo = String(tRow[1]?.value || '');
+        const tPhone = String(tRow[2]?.value || '');
+        const tName = String(tRow[3]?.value || '');
+        [tId, `EMP-${tId}`, tEmpNo, `EMP-${tEmpNo}`, tPhone, tName].filter(Boolean).forEach(id => possibleIds.add(id));
+      }
+    } catch(e) {}
+
+    try {
+      const sLookup = await executeTursoQuery(
+        `SELECT id, admissionNo, phone, fullName FROM students 
+         WHERE admissionNo = ? OR CAST(id AS TEXT) = ? OR phone = ? LIMIT 1`,
+        [sAdm || rawId, rawId, sPhone || rawId]
+      );
+      const sRow = sLookup?.results?.[0]?.response?.result?.rows?.[0];
+      if (sRow) {
+        const sId = String(sRow[0]?.value || '');
+        const sAdmNo = String(sRow[1]?.value || '');
+        const sPh = String(sRow[2]?.value || '');
+        const sName = String(sRow[3]?.value || '');
+        [sId, sAdmNo, sPh, sName].filter(Boolean).forEach(id => possibleIds.add(id));
+      }
+    } catch(e) {}
+  }
 
   let incomingCall = null;
   let activeCall = null;
