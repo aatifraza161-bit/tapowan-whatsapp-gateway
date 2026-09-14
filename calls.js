@@ -151,19 +151,40 @@ async function getFcmAccessToken() {
 async function sendIncomingCallPush({ receiverId, receiverName, callerId, callerName, callerRole, callerAvatar, callId, offerSdp }) {
   try {
     const sReceiverId = String(receiverId || '').trim();
-    const rawId = sReceiverId.replace('EMP-', '').trim();
+    const cleanId = sReceiverId
+      .replace(/^student_/i, '')
+      .replace(/^teacher_/i, '')
+      .replace(/^EMP-/i, '')
+      .trim();
+    const cleanName = String(receiverName || '')
+      .replace(/\s*\([^)]*\)/g, '')
+      .replace(/👨‍🏫|👩‍🏫|📞/g, '')
+      .trim();
+
     let tokens = [];
 
-    // 1. Direct match in app_push_tokens (admissionNo, raw ID, EMP-id)
+    // Generate possible ID aliases (e.g. "482", "0482", "00482", "33", "033", "EMP-04")
+    const idAliases = new Set([sReceiverId, cleanId, `EMP-${cleanId}`, `student_${cleanId}`]);
+    if (/^\d+$/.test(cleanId)) {
+      const num = parseInt(cleanId, 10);
+      idAliases.add(String(num));
+      idAliases.add(String(num).padStart(2, '0'));
+      idAliases.add(String(num).padStart(3, '0'));
+      idAliases.add(String(num).padStart(4, '0'));
+    }
+
+    const aliasArr = [...idAliases];
+    const placeholders = aliasArr.map(() => '?').join(' OR admission_no = ');
+
+    // 1. Direct match in app_push_tokens (admissionNo aliases, raw ID, clean name)
     const res = await executeTursoQuery(
       `SELECT token FROM app_push_tokens 
-       WHERE admission_no = ? 
-          OR admission_no = ? 
-          OR admission_no = ? 
-          OR admission_no = ?
+       WHERE admission_no = ${placeholders}
           OR admission_no LIKE ?
-       ORDER BY id DESC LIMIT 10`,
-      [sReceiverId, rawId, `EMP-${rawId}`, `EMP-${sReceiverId}`, `%${rawId}%`]
+          OR student_name = ?
+          OR student_name LIKE ?
+       ORDER BY id DESC LIMIT 15`,
+      [...aliasArr, `%${cleanId}%`, cleanName, `%${cleanName}%`]
     );
     const rows = res?.results?.[0]?.response?.result?.rows || [];
     tokens.push(...rows.map(r => r[0]?.value).filter(Boolean));
@@ -187,7 +208,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
           OR t.fullName = ?
           OR t.fullName LIKE ?
        ORDER BY apt.id DESC LIMIT 10`,
-      [rawId, sReceiverId, sReceiverId, rawId, sReceiverId, receiverName || '', `%${receiverName || ''}%`]
+      [cleanId, sReceiverId, sReceiverId, cleanId, sReceiverId, cleanName, `%${cleanName}%`]
     );
     const tRows = tRes?.results?.[0]?.response?.result?.rows || [];
     tokens.push(...tRows.map(r => r[0]?.value).filter(Boolean));
@@ -208,19 +229,21 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
           OR s.phone = ? 
           OR s.phone1 = ?
           OR s.fullName = ?
+          OR s.fullName LIKE ?
        ORDER BY apt.id DESC LIMIT 10`,
-      [sReceiverId, rawId, rawId, sReceiverId, sReceiverId, receiverName || '']
+      [sReceiverId, cleanId, cleanId, cleanId, cleanId, cleanName, `%${cleanName}%`]
     );
     const sRows = sRes?.results?.[0]?.response?.result?.rows || [];
     tokens.push(...sRows.map(r => r[0]?.value).filter(Boolean));
 
-    // 4. Fallback search by receiverName in student_name if still empty
-    if (tokens.length === 0 && receiverName && receiverName !== 'Receiver' && receiverName !== 'School Contact') {
+    // 4. Fallback search by cleanName in student_name if still empty
+    if (tokens.length === 0 && cleanName && cleanName !== 'Receiver' && cleanName !== 'Student' && cleanName !== 'School Contact') {
       const nameRes = await executeTursoQuery(
         `SELECT token FROM app_push_tokens 
-         WHERE student_name LIKE ?
+         WHERE student_name = ?
+            OR student_name LIKE ?
          ORDER BY id DESC LIMIT 5`,
-        [`%${receiverName}%`]
+        [cleanName, `%${cleanName}%`]
       );
       const nameRows = nameRes?.results?.[0]?.response?.result?.rows || [];
       tokens.push(...nameRows.map(r => r[0]?.value).filter(Boolean));
@@ -228,11 +251,11 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
 
     const uniqueTokens = [...new Set(tokens)];
     if (uniqueTokens.length === 0) {
-      console.log(`[Render VoIP] No push token found for receiver: ${sReceiverId} (${receiverName})`);
+      console.log(`[Render VoIP] No push token found for receiver: ${sReceiverId} (${cleanName})`);
       return;
     }
 
-    console.log(`[Render VoIP] Dispatching call push to ${uniqueTokens.length} token(s) for ${receiverName}`);
+    console.log(`[Render VoIP] Dispatching call push to ${uniqueTokens.length} token(s) for ${cleanName}`);
 
     // Direct Google Firebase FCM v1 Delivery for native Android tokens
     const fcmTokens = uniqueTokens.filter(t => !t.startsWith('ExponentPushToken'));
