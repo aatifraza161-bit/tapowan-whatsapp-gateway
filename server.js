@@ -686,6 +686,14 @@ const {
 } = require('./calls');
 
 // ── VOIP CALLS & CLASSROOM AUDIO ROOMS ROUTING (Render 24/7 Persistent Server) ──
+app.use('/api/calls', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  next();
+});
+
 app.post('/api/calls/initiate', async (req, res) => {
   try {
     const result = await initiateCall(req.body || {});

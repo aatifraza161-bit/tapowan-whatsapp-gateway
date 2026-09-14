@@ -412,15 +412,16 @@ async function respondCall({ callId, userId, action, answerSdp }) {
   if (!callId || !action) return { ok: false, status: 400, error: "Missing callId or action" };
 
   let call = activeCallsMap.get(callId);
-  if (!call) {
+  try {
     const res = await executeTursoQuery("SELECT * FROM app_voice_calls WHERE call_id = ? LIMIT 1", [callId]);
     const row = res?.results?.[0]?.response?.result?.rows?.[0];
     if (row) {
       const cols = res.results[0].response.result.cols.map(c => c.name);
-      call = {};
-      cols.forEach((col, idx) => { call[col] = row[idx]?.value; });
+      const dbCall = {};
+      cols.forEach((col, idx) => { dbCall[col] = row[idx]?.value; });
+      call = { ...(call || {}), ...dbCall };
     }
-  }
+  } catch (e) {}
 
   if (!call) return { ok: false, status: 404, error: "Call not found" };
 
@@ -450,15 +451,16 @@ async function sendCallSignal({ callId, senderId, offerSdp, answerSdp, iceCandid
   if (!callId) return { ok: false, status: 400, error: "Missing callId" };
 
   let call = activeCallsMap.get(callId);
-  if (!call) {
+  try {
     const res = await executeTursoQuery("SELECT * FROM app_voice_calls WHERE call_id = ? LIMIT 1", [callId]);
     const row = res?.results?.[0]?.response?.result?.rows?.[0];
     if (row) {
       const cols = res.results[0].response.result.cols.map(c => c.name);
-      call = {};
-      cols.forEach((col, idx) => { call[col] = row[idx]?.value; });
+      const dbCall = {};
+      cols.forEach((col, idx) => { dbCall[col] = row[idx]?.value; });
+      call = { ...(call || {}), ...dbCall };
     }
-  }
+  } catch (e) {}
 
   if (!call) return { ok: false, status: 404, error: "Call not found" };
 
