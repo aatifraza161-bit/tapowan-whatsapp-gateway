@@ -445,10 +445,13 @@ async function respondCall({ callId, userId, action, answerSdp }) {
   return { ok: true, call };
 }
 
+// ── In-Memory Accumulated ICE Candidates Map (Prevents Race-Condition Overwrites) ──
+const callCandidatesStore = new Map(); // call_id -> { caller: Map<string, object>, receiver: Map<string, object> }
+
 /**
  * 3. Send WebRTC Signal (SDP or ICE Candidates)
  */
-async function sendCallSignal({ callId, senderId, offerSdp, answerSdp, iceCandidate, isCaller }) {
+async function sendCallSignal({ callId, senderId, offerSdp, answerSdp, iceCandidate, iceCandidates, isCaller }) {
   if (!callId) return { ok: false, status: 400, error: "Missing callId" };
 
   let call = activeCallsMap.get(callId);
@@ -468,24 +471,64 @@ async function sendCallSignal({ callId, senderId, offerSdp, answerSdp, iceCandid
   if (offerSdp) call.offer_sdp = offerSdp;
   if (answerSdp) call.answer_sdp = answerSdp;
 
-  if (iceCandidate) {
-    const key = isCaller ? 'caller_ice' : 'receiver_ice';
-    let currentIce = [];
-    try {
-      currentIce = typeof call[key] === 'string' ? JSON.parse(call[key] || '[]') : (call[key] || []);
-    } catch (e) {
-      currentIce = [];
-    }
-    if (!Array.isArray(currentIce)) currentIce = [];
+  // Initialize or retrieve in-memory candidate store
+  if (!callCandidatesStore.has(callId)) {
+    callCandidatesStore.set(callId, {
+      caller: new Map(),
+      receiver: new Map()
+    });
+  }
+  const store = callCandidatesStore.get(callId);
 
-    const candStr = JSON.stringify(iceCandidate);
-    if (!currentIce.some(existing => JSON.stringify(existing) === candStr)) {
-      currentIce.push(iceCandidate);
-    }
-    call[key] = JSON.stringify(currentIce);
+  // Hydrate store from existing DB record if in-memory set is empty
+  if (store.caller.size === 0 && call.caller_ice) {
+    try {
+      const parsed = typeof call.caller_ice === 'string' ? JSON.parse(call.caller_ice) : call.caller_ice;
+      if (Array.isArray(parsed)) {
+        parsed.forEach(c => {
+          if (c?.candidate) store.caller.set(c.candidate, c);
+        });
+      }
+    } catch (e) {}
+  }
+  if (store.receiver.size === 0 && call.receiver_ice) {
+    try {
+      const parsed = typeof call.receiver_ice === 'string' ? JSON.parse(call.receiver_ice) : call.receiver_ice;
+      if (Array.isArray(parsed)) {
+        parsed.forEach(c => {
+          if (c?.candidate) store.receiver.set(c.candidate, c);
+        });
+      }
+    } catch (e) {}
   }
 
-  call.updated_at = new Date().toISOString();
+  // Ingest incoming candidate(s)
+  const incomingList = [];
+  if (Array.isArray(iceCandidates)) incomingList.push(...iceCandidates);
+  if (iceCandidate) incomingList.push(iceCandidate);
+
+  if (incomingList.length > 0) {
+    const targetMap = isCaller ? store.caller : store.receiver;
+    for (const cand of incomingList) {
+      if (!cand) continue;
+      let candObj = cand;
+      if (typeof candObj === 'string') {
+        try { candObj = JSON.parse(candObj); } catch (e) {}
+      }
+      const key = candObj?.candidate || (typeof candObj === 'string' ? candObj : JSON.stringify(candObj));
+      if (key) {
+        targetMap.set(key, candObj);
+      }
+    }
+  }
+
+  const callerIceStr = JSON.stringify(Array.from(store.caller.values()));
+  const receiverIceStr = JSON.stringify(Array.from(store.receiver.values()));
+  const now = new Date().toISOString();
+
+  call.caller_ice = callerIceStr;
+  call.receiver_ice = receiverIceStr;
+  call.updated_at = now;
   activeCallsMap.set(callId, call);
 
   executeTursoQuery(`UPDATE app_voice_calls SET 
@@ -495,7 +538,7 @@ async function sendCallSignal({ callId, senderId, offerSdp, answerSdp, iceCandid
     receiver_ice = ?, 
     updated_at = ? 
     WHERE call_id = ?`, [
-    call.offer_sdp || null, call.answer_sdp || null, call.caller_ice, call.receiver_ice, call.updated_at, callId
+    call.offer_sdp || null, call.answer_sdp || null, callerIceStr, receiverIceStr, now, callId
   ]).catch(() => {});
 
   return { ok: true, call };
@@ -728,6 +771,17 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
           break;
         }
       }
+    }
+  }
+
+  // Ensure activeCall has all in-memory accumulated candidates
+  if (activeCall && callCandidatesStore.has(activeCall.call_id)) {
+    const store = callCandidatesStore.get(activeCall.call_id);
+    if (store.caller.size > 0) {
+      activeCall.caller_ice = JSON.stringify(Array.from(store.caller.values()));
+    }
+    if (store.receiver.size > 0) {
+      activeCall.receiver_ice = JSON.stringify(Array.from(store.receiver.values()));
     }
   }
 

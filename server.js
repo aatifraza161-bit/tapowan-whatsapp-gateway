@@ -794,6 +794,52 @@ app.get('/api/calls/group/poll', async (req, res) => {
   }
 });
 
+// ----------------------------------------------------
+// ⚡ 24/7 Anti-Sleep Heartbeat & Uptime Endpoints
+// ----------------------------------------------------
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: 'Tapowan WhatsApp Gateway & VoIP Signaling',
+    status: 'online',
+    uptimeSec: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/api/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
+// Self-ping every 8 minutes so Render free tier never spins down (spins down at 15 min)
+const HEARTBEAT_INTERVAL_MS = 8 * 60 * 1000;
+function startAntiSleepHeartbeat() {
+  const https = require('https');
+  const targetUrl = `${RENDER_EXTERNAL_URL}/api/health`;
+  
+  console.log(`[Anti-Sleep] Starting keep-alive heartbeat targeting: ${targetUrl} every 8 minutes`);
+  setInterval(() => {
+    try {
+      const req = https.get(targetUrl, { timeout: 10000 }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          console.log(`[Anti-Sleep] Heartbeat ping successful -> status ${res.statusCode} (uptime: ${Math.floor(process.uptime())}s)`);
+        });
+      });
+      req.on('error', (err) => {
+        console.warn(`[Anti-Sleep] Heartbeat ping warning: ${err.message}`);
+      });
+      req.on('timeout', () => {
+        req.abort();
+        console.warn('[Anti-Sleep] Heartbeat ping timed out');
+      });
+    } catch (e) {
+      console.warn('[Anti-Sleep] Heartbeat interval exception:', e.message);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log('====================================================');
   console.log(`🚀 Tapowan WhatsApp Gateway & VoIP Signaling Server on port ${PORT}`);
@@ -802,4 +848,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('⚡ Anti-Sleep Keep-Alive: ACTIVE');
   console.log('☁️ Turso Session Sync: ACTIVE');
   console.log('====================================================');
+  startAntiSleepHeartbeat();
 });
+
