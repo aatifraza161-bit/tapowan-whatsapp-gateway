@@ -490,6 +490,54 @@ async function sendCallSignal({ callId, senderId, offerSdp, answerSdp, iceCandid
   return { ok: true, call };
 }
 
+async function sendCallEndedPush({ receiverId, receiverName, callId }) {
+  try {
+    const sReceiverId = String(receiverId || '').trim();
+    const rawId = sReceiverId.replace('EMP-', '');
+
+    const tokens = [];
+    const directRes = await executeTursoQuery(
+      "SELECT token FROM app_push_tokens WHERE admission_no = ? OR admission_no = ? ORDER BY id DESC LIMIT 5",
+      [sReceiverId, rawId]
+    );
+    tokens.push(...(directRes?.results?.[0]?.response?.result?.rows || []).map(r => r[0]?.value).filter(Boolean));
+
+    const uniqueTokens = [...new Set(tokens)];
+    if (uniqueTokens.length === 0) return;
+
+    const fcmTokens = uniqueTokens.filter(t => !t.startsWith('ExponentPushToken'));
+    if (fcmTokens.length > 0) {
+      const accessToken = await getFcmAccessToken();
+      if (accessToken) {
+        for (const token of fcmTokens) {
+          fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
+            method: 'POST',
+            headers: {
+              'Authorization': 'Bearer ' + accessToken,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              message: {
+                token: token,
+                android: {
+                  priority: 'HIGH',
+                  ttl: '30s'
+                },
+                data: {
+                  type: 'CALL_ENDED',
+                  callId: callId
+                }
+              }
+            })
+          }).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.log('[Render VoIP] sendCallEndedPush error:', err.message);
+  }
+}
+
 /**
  * 4. End 1-on-1 Voice Call
  */
@@ -497,10 +545,19 @@ async function endCall({ callId, durationSec = 0 }) {
   if (!callId) return { ok: false, status: 400, error: "Missing callId" };
 
   let call = activeCallsMap.get(callId);
+  const wasRinging = call?.status === 'ringing';
   if (call) {
     call.status = 'ended';
     call.duration_sec = durationSec || call.duration_sec || 0;
     call.updated_at = new Date().toISOString();
+  }
+
+  if (wasRinging && call?.receiver_id) {
+    sendCallEndedPush({
+      receiverId: call.receiver_id,
+      receiverName: call.receiver_name,
+      callId: callId
+    }).catch(() => {});
   }
 
   executeTursoQuery("UPDATE app_voice_calls SET status = 'ended', duration_sec = ?, updated_at = CURRENT_TIMESTAMP WHERE call_id = ?", [
