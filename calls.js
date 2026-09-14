@@ -236,7 +236,27 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
     const sRows = sRes?.results?.[0]?.response?.result?.rows || [];
     tokens.push(...sRows.map(r => r[0]?.value).filter(Boolean));
 
-    // 4. Fallback search by cleanName in student_name if still empty
+    // 4. Student session lookup fallback (app_student_sessions)
+    if (tokens.length === 0) {
+      const sessRes = await executeTursoQuery(
+        `SELECT apt.token FROM app_push_tokens apt
+         JOIN app_student_sessions ass ON (
+           apt.admission_no = ass.admission_no
+           OR apt.admission_no = ass.phone
+           OR apt.student_name = ass.student_name
+         )
+         WHERE ass.admission_no = ? 
+            OR ass.admission_no = ?
+            OR ass.student_name = ?
+            OR ass.student_name LIKE ?
+         ORDER BY apt.id DESC LIMIT 10`,
+        [sReceiverId, cleanId, cleanName, `%${cleanName}%`]
+      );
+      const sessRows = sessRes?.results?.[0]?.response?.result?.rows || [];
+      tokens.push(...sessRows.map(r => r[0]?.value).filter(Boolean));
+    }
+
+    // 5. Fallback search by cleanName in student_name if still empty
     if (tokens.length === 0 && cleanName && cleanName !== 'Receiver' && cleanName !== 'Student' && cleanName !== 'School Contact') {
       const nameRes = await executeTursoQuery(
         `SELECT token FROM app_push_tokens 
