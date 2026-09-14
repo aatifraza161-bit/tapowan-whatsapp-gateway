@@ -22,7 +22,8 @@ async function executeTursoQuery(sql, args = []) {
       },
       body: JSON.stringify({
         requests: [
-          { type: 'execute', stmt: { sql, args: formattedArgs } }
+          { type: 'execute', stmt: { sql, args: formattedArgs } },
+          { type: 'close' }
         ]
       })
     });
