@@ -147,7 +147,7 @@ async function getFcmAccessToken() {
 /**
  * Send High-Priority Incoming Call Push Notification via Direct Firebase FCM v1 & Expo
  */
-async function sendIncomingCallPush({ receiverId, receiverName, callerId, callerName, callerRole, callerAvatar, callId }) {
+async function sendIncomingCallPush({ receiverId, receiverName, callerId, callerName, callerRole, callerAvatar, callId, offerSdp }) {
   try {
     const sReceiverId = String(receiverId || '').trim();
     const rawId = sReceiverId.replace('EMP-', '').trim();
@@ -249,16 +249,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
                   token: token,
                   android: {
                     priority: 'HIGH',
-                    notification: {
-                      channel_id: 'calls',
-                      notification_priority: 'PRIORITY_MAX',
-                      sound: 'default',
-                      visibility: 'PUBLIC'
-                    }
-                  },
-                  notification: {
-                    title: `${callerName}`,
-                    body: `📞 Incoming voice call`
+                    ttl: '60s'
                   },
                   data: {
                     title: `${callerName}`,
@@ -308,6 +299,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
         priority: 'high',
         categoryId: 'call_incoming',
         categoryIdentifier: 'call_incoming',
+        _category: 'call_incoming',
         badge: 1,
         ttl: 60,
         data: {
@@ -388,7 +380,8 @@ async function initiateCall({ callerId, callerName, callerRole, callerAvatar, re
     callerName: callRecord.caller_name,
     callerRole: callRecord.caller_role,
     callerAvatar: callRecord.caller_avatar,
-    callId: callRecord.call_id
+    callId: callRecord.call_id,
+    offerSdp: offerSdp || null
   }).catch(() => {});
 
   // Async persist to Turso DB
