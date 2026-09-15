@@ -148,7 +148,7 @@ async function getFcmAccessToken() {
 /**
  * Send High-Priority Incoming Call Push Notification via Direct Firebase FCM v1 & Expo
  */
-async function sendIncomingCallPush({ receiverId, receiverName, callerId, callerName, callerRole, callerAvatar, callId, offerSdp }) {
+async function sendIncomingCallPush({ receiverId, receiverName, receiverRole, callerId, callerName, callerRole, callerAvatar, callId, offerSdp }) {
   try {
     const sReceiverId = String(receiverId || '').trim();
     const cleanId = sReceiverId
@@ -161,9 +161,6 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       .replace(/👨‍🏫|👩‍🏫|📞/g, '')
       .trim();
 
-    let tokens = [];
-
-    // Generate possible ID aliases (e.g. "482", "0482", "00482", "33", "033", "EMP-04")
     const idAliases = new Set([sReceiverId, cleanId, `EMP-${cleanId}`, `student_${cleanId}`]);
     if (/^\d+$/.test(cleanId)) {
       const num = parseInt(cleanId, 10);
@@ -171,102 +168,135 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
       idAliases.add(String(num).padStart(2, '0'));
       idAliases.add(String(num).padStart(3, '0'));
       idAliases.add(String(num).padStart(4, '0'));
+      idAliases.add(`EMP-${num}`);
+      idAliases.add(`EMP-${String(num).padStart(2, '0')}`);
+    }
+    if (cleanId.includes('/')) {
+      const parts = cleanId.split('/');
+      idAliases.add(cleanId.replace(/^0+/, ''));
+      idAliases.add(cleanId.replace('/', ''));
+      if (parts[0]) {
+        idAliases.add(parts[0]);
+        idAliases.add(parts[0].replace(/^0+/, ''));
+        if (parts[1]) {
+          idAliases.add(`${parts[0].replace(/^0+/, '')}/${parts[1]}`);
+        }
+      }
     }
 
-    const aliasArr = [...idAliases];
-    const placeholders = aliasArr.map(() => '?').join(' OR admission_no = ');
+    const aliasArr = [...idAliases].filter(Boolean);
+    const isGenuineName = cleanName.length >= 3 && !['Student', 'Guest', 'Receiver', 'Faculty Member', 'School Contact', 'Faculty'].includes(cleanName);
 
-    // 1. Direct match in app_push_tokens (admissionNo aliases, raw ID, clean name)
-    const res = await executeTursoQuery(
-      `SELECT token FROM app_push_tokens 
-       WHERE admission_no = ${placeholders}
-          OR admission_no LIKE ?
-          OR student_name = ?
-          OR student_name LIKE ?
-       ORDER BY id DESC LIMIT 15`,
-      [...aliasArr, `%${cleanId}%`, cleanName, `%${cleanName}%`]
+    let tokens = [];
+
+    // 1. Direct match on exact aliases in app_push_tokens
+    const placeholders = aliasArr.map(() => '?').join(',');
+    const directRes = await executeTursoQuery(
+      `SELECT token, admission_no, student_name FROM app_push_tokens WHERE admission_no IN (${placeholders}) ORDER BY id DESC LIMIT 15`,
+      aliasArr
     );
-    const rows = res?.results?.[0]?.response?.result?.rows || [];
+    const rows = directRes?.results?.[0]?.response?.result?.rows || [];
     tokens.push(...rows.map(r => r[0]?.value).filter(Boolean));
 
-    // 2. Teacher fallback lookup (id, phone, employeeNo, fullName)
-    const tRes = await executeTursoQuery(
-      `SELECT apt.token FROM app_push_tokens apt
-       JOIN teachers t ON (
-         apt.admission_no = CAST(t.id AS TEXT) 
-         OR apt.admission_no = ('EMP-' || t.id)
-         OR apt.admission_no = t.phone
-         OR apt.admission_no = t.employeeNo
-         OR apt.admission_no = ('EMP-' || t.employeeNo)
-         OR apt.student_name = t.fullName
-       )
-       WHERE CAST(t.id AS TEXT) = ? 
-          OR ('EMP-' || t.id) = ? 
-          OR t.phone = ? 
-          OR t.employeeNo = ? 
-          OR ('EMP-' || t.employeeNo) = ?
-          OR t.fullName = ?
-          OR t.fullName LIKE ?
-       ORDER BY apt.id DESC LIMIT 10`,
-      [cleanId, sReceiverId, sReceiverId, cleanId, sReceiverId, cleanName, `%${cleanName}%`]
-    );
-    const tRows = tRes?.results?.[0]?.response?.result?.rows || [];
-    tokens.push(...tRows.map(r => r[0]?.value).filter(Boolean));
-
-    // 3. Student fallback lookup (admissionNo, phone, id, fullName)
-    const sRes = await executeTursoQuery(
-      `SELECT apt.token FROM app_push_tokens apt
-       JOIN students s ON (
-         apt.admission_no = s.admissionNo 
-         OR apt.admission_no = s.phone 
-         OR apt.admission_no = s.phone1
-         OR apt.admission_no = CAST(s.id AS TEXT)
-         OR apt.student_name = s.fullName
-       )
-       WHERE s.admissionNo = ? 
-          OR s.admissionNo = ?
-          OR CAST(s.id AS TEXT) = ? 
-          OR s.phone = ? 
-          OR s.phone1 = ?
-          OR s.fullName = ?
-          OR s.fullName LIKE ?
-       ORDER BY apt.id DESC LIMIT 10`,
-      [sReceiverId, cleanId, cleanId, cleanId, cleanId, cleanName, `%${cleanName}%`]
-    );
-    const sRows = sRes?.results?.[0]?.response?.result?.rows || [];
-    tokens.push(...sRows.map(r => r[0]?.value).filter(Boolean));
-
-    // 4. Student session lookup fallback (app_student_sessions)
-    if (tokens.length === 0) {
-      const sessRes = await executeTursoQuery(
-        `SELECT apt.token FROM app_push_tokens apt
-         JOIN app_student_sessions ass ON (
-           apt.admission_no = ass.admission_no
-           OR apt.admission_no = ass.phone
-           OR apt.student_name = ass.student_name
-         )
-         WHERE ass.admission_no = ? 
-            OR ass.admission_no = ?
-            OR ass.student_name = ?
-            OR ass.student_name LIKE ?
-         ORDER BY apt.id DESC LIMIT 10`,
-        [sReceiverId, cleanId, cleanName, `%${cleanName}%`]
-      );
-      const sessRows = sessRes?.results?.[0]?.response?.result?.rows || [];
-      tokens.push(...sessRows.map(r => r[0]?.value).filter(Boolean));
-    }
-
-    // 5. Fallback search by cleanName in student_name if still empty
-    if (tokens.length === 0 && cleanName && cleanName !== 'Receiver' && cleanName !== 'Student' && cleanName !== 'School Contact') {
+    // 2. Direct match on exact name if genuine
+    if (isGenuineName) {
       const nameRes = await executeTursoQuery(
-        `SELECT token FROM app_push_tokens 
-         WHERE student_name = ?
-            OR student_name LIKE ?
-         ORDER BY id DESC LIMIT 5`,
-        [cleanName, `%${cleanName}%`]
+        `SELECT token, admission_no, student_name FROM app_push_tokens WHERE student_name = ? OR UPPER(student_name) = UPPER(?) ORDER BY id DESC LIMIT 10`,
+        [cleanName, cleanName]
       );
       const nameRows = nameRes?.results?.[0]?.response?.result?.rows || [];
       tokens.push(...nameRows.map(r => r[0]?.value).filter(Boolean));
+    }
+
+    // 3. Relational Student Lookup (if receiver is a student or role unstated)
+    if (receiverRole === 'student' || (!receiverRole && !sReceiverId.startsWith('EMP-'))) {
+      const sRes = await executeTursoQuery(
+        `SELECT id, admissionNo, phone, phone1, phone2, fullName FROM students 
+         WHERE admissionNo IN (${placeholders}) OR CAST(id AS TEXT) IN (${placeholders}) OR phone = ? OR phone1 = ? OR fullName = ? OR UPPER(fullName) = UPPER(?) LIMIT 5`,
+        [...aliasArr, ...aliasArr, cleanId, cleanId, cleanName, cleanName]
+      );
+      const sResultRows = sRes?.results?.[0]?.response?.result?.rows || [];
+      const sCols = sRes?.results?.[0]?.response?.result?.cols || [];
+      for (const sRow of sResultRows) {
+        const s = {};
+        sCols.forEach((c, idx) => { s[c.name] = sRow[idx]?.value; });
+        const sAliases = [s.admissionNo, s.phone, s.phone1, s.phone2, String(s.id), s.fullName].filter(Boolean);
+        const sPlaceholders = sAliases.map(() => '?').join(',');
+        const sPushRes = await executeTursoQuery(
+          `SELECT token, admission_no, student_name FROM app_push_tokens WHERE admission_no IN (${sPlaceholders}) OR student_name = ? ORDER BY id DESC LIMIT 10`,
+          [...sAliases, s.fullName]
+        );
+        const sPushRows = sPushRes?.results?.[0]?.response?.result?.rows || [];
+        tokens.push(...sPushRows.map(r => r[0]?.value).filter(Boolean));
+      }
+    }
+
+    // 4. Relational Teacher Lookup (if receiver is a teacher or role is teacher/staff)
+    if (receiverRole === 'teacher' || (!receiverRole && sReceiverId.startsWith('EMP-'))) {
+      const tRes = await executeTursoQuery(
+        `SELECT id, employeeNo, phone, fullName FROM teachers 
+         WHERE id = ? OR employeeNo = ? OR ('EMP-' || employeeNo) = ? OR ('EMP-' || id) = ? OR phone = ? OR fullName = ? OR UPPER(fullName) = UPPER(?) LIMIT 5`,
+        [cleanId, cleanId, sReceiverId, sReceiverId, cleanId, cleanName, cleanName]
+      );
+      const tResultRows = tRes?.results?.[0]?.response?.result?.rows || [];
+      const tCols = tRes?.results?.[0]?.response?.result?.cols || [];
+      for (const tRow of tResultRows) {
+        const t = {};
+        tCols.forEach((c, idx) => { t[c.name] = tRow[idx]?.value; });
+        const tAliases = [
+          String(t.id),
+          `EMP-${t.id}`,
+          String(t.employeeNo),
+          `EMP-${t.employeeNo}`,
+          t.phone,
+          t.fullName
+        ].filter(Boolean);
+        const tPlaceholders = tAliases.map(() => '?').join(',');
+        const tPushRes = await executeTursoQuery(
+          `SELECT token, admission_no, student_name FROM app_push_tokens WHERE admission_no IN (${tPlaceholders}) OR student_name = ? ORDER BY id DESC LIMIT 10`,
+          [...tAliases, t.fullName]
+        );
+        const tPushRows = tPushRes?.results?.[0]?.response?.result?.rows || [];
+        tokens.push(...tPushRows.map(r => r[0]?.value).filter(Boolean));
+      }
+    }
+
+    // 5. Active Student Sessions fallback
+    if (tokens.length === 0 && receiverRole !== 'teacher') {
+      const sessRes = await executeTursoQuery(
+        `SELECT admission_no, phone, student_name FROM app_student_sessions 
+         WHERE admission_no IN (${placeholders}) OR phone = ? OR student_name = ? OR UPPER(student_name) = UPPER(?) LIMIT 5`,
+        [...aliasArr, cleanId, cleanName, cleanName]
+      );
+      const sessResultRows = sessRes?.results?.[0]?.response?.result?.rows || [];
+      const sessCols = sessRes?.results?.[0]?.response?.result?.cols || [];
+      for (const sessRow of sessResultRows) {
+        const sess = {};
+        sessCols.forEach((c, idx) => { sess[c.name] = sessRow[idx]?.value; });
+        const sessAliases = [sess.admission_no, sess.phone, sess.student_name].filter(Boolean);
+        const sessPlaceholders = sessAliases.map(() => '?').join(',');
+        const sessPushRes = await executeTursoQuery(
+          `SELECT token, admission_no, student_name FROM app_push_tokens WHERE admission_no IN (${sessPlaceholders}) OR student_name = ? ORDER BY id DESC LIMIT 10`,
+          [...sessAliases, sess.student_name]
+        );
+        const sessPushRows = sessPushRes?.results?.[0]?.response?.result?.rows || [];
+        tokens.push(...sessPushRows.map(r => r[0]?.value).filter(Boolean));
+      }
+    }
+
+    // Exclude caller's own push tokens to prevent caller ringing themselves
+    const sCallerId = String(callerId || '').trim();
+    if (sCallerId) {
+      try {
+        const callerClean = sCallerId.replace(/^EMP-/i, '').trim();
+        const callerRes = await executeTursoQuery(
+          `SELECT token FROM app_push_tokens WHERE admission_no = ? OR admission_no = ? OR admission_no = ? OR student_name = ?`,
+          [sCallerId, callerClean, `EMP-${callerClean}`, callerName || '']
+        );
+        const callerRows = callerRes?.results?.[0]?.response?.result?.rows || [];
+        const callerTokens = new Set(callerRows.map(r => r[0]?.value).filter(Boolean));
+        tokens = tokens.filter(t => !callerTokens.has(t));
+      } catch (e) {}
     }
 
     const uniqueTokens = [...new Set(tokens)];
@@ -280,62 +310,67 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
     // Direct Google Firebase FCM v1 Delivery for native Android tokens
     const fcmTokens = uniqueTokens.filter(t => !t.startsWith('ExponentPushToken'));
     if (fcmTokens.length > 0) {
-      getFcmAccessToken().then(async (accessToken) => {
-        if (!accessToken) return;
-        for (const token of fcmTokens) {
-          try {
-            const fcmData = {
-              title: `${callerName}`,
-              message: `📞 Incoming voice call`,
-              body: `📞 Incoming voice call`,
-              channelId: 'calls',
-              categoryId: 'call_incoming',
-              categoryIdentifier: 'call_incoming',
-              _category: 'call_incoming',
-              type: 'INCOMING_CALL',
-              callId: callId,
-              callerId: String(callerId || ''),
-              callerName: callerName,
-              callerRole: callerRole,
-              callerAvatar: callerAvatar || '',
-              sound: 'default',
-              vibrate: '[0, 800, 500, 800, 500, 800]'
-            };
-            if (offerSdp && typeof offerSdp === 'string' && offerSdp.length < 3200) {
-              fcmData.offerSdp = offerSdp;
-            }
+      try {
+        const accessToken = await getFcmAccessToken();
+        if (accessToken) {
+          const fcmPromises = fcmTokens.map(async (token) => {
+            try {
+              const fcmData = {
+                title: `${callerName}`,
+                message: `📞 Incoming voice call`,
+                body: `📞 Incoming voice call`,
+                channelId: 'calls',
+                categoryId: 'call_incoming',
+                categoryIdentifier: 'call_incoming',
+                _category: 'call_incoming',
+                type: 'INCOMING_CALL',
+                callId: callId,
+                callerId: String(callerId || ''),
+                callerName: callerName,
+                callerRole: callerRole,
+                callerAvatar: callerAvatar || '',
+                sound: 'default',
+                vibrate: '[0, 800, 500, 800, 500, 800]'
+              };
+              if (offerSdp && typeof offerSdp === 'string' && offerSdp.length < 3200) {
+                fcmData.offerSdp = offerSdp;
+              }
 
-            const fcmRes = await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
-              method: 'POST',
-              headers: {
-                'Authorization': 'Bearer ' + accessToken,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                message: {
-                  token: token,
-                  android: {
-                    priority: 'HIGH',
-                    ttl: '60s'
-                  },
-                  data: fcmData
-                }
-              })
-            });
-            if (fcmRes.status === 200) {
-              console.log(`[FCM v1] Direct call push sent to token ${token.substring(0, 15)}...`);
-            } else if (fcmRes.status === 404) {
-              console.log(`[FCM v1] Dead token 404 -> removing ${token.substring(0, 15)}...`);
-              executeTursoQuery('DELETE FROM app_push_tokens WHERE token = ?', [token]).catch(() => {});
-            } else {
-              const errTxt = await fcmRes.text();
-              console.log(`[FCM v1] Response ${fcmRes.status}:`, errTxt);
+              const fcmRes = await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': 'Bearer ' + accessToken,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  message: {
+                    token: token,
+                    android: {
+                      priority: 'HIGH',
+                      ttl: '60s'
+                    },
+                    data: fcmData
+                  }
+                })
+              });
+              if (fcmRes.status === 200) {
+                console.log(`[FCM v1] Direct call push sent to token ${token.substring(0, 15)}...`);
+              } else if (fcmRes.status === 404) {
+                console.log(`[FCM v1] Dead token (404) -> removing ${token.substring(0, 15)}...`);
+                executeTursoQuery('DELETE FROM app_push_tokens WHERE token = ?', [token]).catch(() => {});
+              } else {
+                const errTxt = await fcmRes.text();
+                console.log(`[FCM v1] Response ${fcmRes.status}:`, errTxt);
+              }
+            } catch (e) {
+              console.log('[FCM v1] Push error:', e.message);
             }
-          } catch (e) {
-            console.log('[FCM v1] Push error:', e.message);
-          }
+          });
+          await Promise.all(fcmPromises);
         }
-      }).catch(e => console.log('[FCM v1] Token error:', e.message));
+      } catch (e) {
+        console.log('[FCM v1] Access token error:', e.message);
+      }
     }
 
     // Expo Push Service Delivery for ExponentPushTokens
@@ -367,7 +402,7 @@ async function sendIncomingCallPush({ receiverId, receiverName, callerId, caller
         _displayInForeground: true
       }));
 
-      fetch('https://exp.host/--/api/v2/push/send', {
+      await fetch('https://exp.host/--/api/v2/push/send', {
         method: 'POST',
         headers: {
           'Accept': 'application/json',
@@ -425,9 +460,10 @@ async function initiateCall({ callerId, callerName, callerRole, callerAvatar, re
   activeCallsMap.set(callId, callRecord);
 
   // Send push notification to wake receiver
-  sendIncomingCallPush({
+  await sendIncomingCallPush({
     receiverId: callRecord.receiver_id,
     receiverName: callRecord.receiver_name,
+    receiverRole: callRecord.receiver_role,
     callerId: callRecord.caller_id,
     callerName: callRecord.caller_name,
     callerRole: callRecord.caller_role,
@@ -604,31 +640,36 @@ async function sendCallEndedPush({ receiverId, receiverName, callId }) {
 
     const fcmTokens = uniqueTokens.filter(t => !t.startsWith('ExponentPushToken'));
     if (fcmTokens.length > 0) {
-      const accessToken = await getFcmAccessToken();
-      if (accessToken) {
-        for (const token of fcmTokens) {
-          fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
-            method: 'POST',
-            headers: {
-              'Authorization': 'Bearer ' + accessToken,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              message: {
-                token: token,
-                android: {
-                  priority: 'HIGH',
-                  ttl: '30s'
+      try {
+        const accessToken = await getFcmAccessToken();
+        if (accessToken) {
+          const endPromises = fcmTokens.map(async (token) => {
+            try {
+              await fetch(`https://fcm.googleapis.com/v1/projects/${FCM_SERVICE_ACCOUNT.project_id}/messages:send`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': 'Bearer ' + accessToken,
+                  'Content-Type': 'application/json'
                 },
-                data: {
-                  type: 'CALL_ENDED',
-                  callId: callId
-                }
-              }
-            })
-          }).catch(() => {});
+                body: JSON.stringify({
+                  message: {
+                    token: token,
+                    android: {
+                      priority: 'HIGH',
+                      ttl: '30s'
+                    },
+                    data: {
+                      type: 'CALL_ENDED',
+                      callId: callId
+                    }
+                  }
+                })
+              });
+            } catch (e) {}
+          });
+          await Promise.all(endPromises);
         }
-      }
+      } catch (e) {}
     }
   } catch (err) {
     console.log('[Render VoIP] sendCallEndedPush error:', err.message);
@@ -650,7 +691,7 @@ async function endCall({ callId, durationSec = 0 }) {
   }
 
   if (wasRinging && call?.receiver_id) {
-    sendCallEndedPush({
+    await sendCallEndedPush({
       receiverId: call.receiver_id,
       receiverName: call.receiver_name,
       callId: callId
@@ -676,6 +717,10 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
   const sAdm = String(admissionNo || '').trim();
   const sPhone = String(phone || '').trim();
   const sActiveCallId = String(activeCallId || '').trim();
+  const sFullName = String(fullName || '').trim();
+
+  const isUserTeacher = isTeacherOrStaff(userRole);
+  const isUserStudent = isStudent(userRole) || (!isUserTeacher && !sUserId.startsWith('EMP-'));
 
   const possibleIds = new Set([
     sUserId,
@@ -687,14 +732,15 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
     `EMP-${sAdm.replace('EMP-', '')}`
   ].filter(Boolean));
 
-  // Expand teacher and student aliases into possibleIds so receiver matches regardless of ID format
+  // Expand teacher and student aliases STRICTLY by role to prevent shared phone number collisions
   const rawId = sUserId.replace('EMP-', '').trim();
-  if (rawId) {
+  if (isUserTeacher) {
+    // Only expand teacher aliases for teacher users!
     try {
       const tLookup = await executeTursoQuery(
         `SELECT id, employeeNo, phone, fullName FROM teachers 
-         WHERE id = ? OR employeeNo = ? OR phone = ? OR fullName = ? LIMIT 1`,
-        [rawId, rawId, sPhone || rawId, fullName || '']
+         WHERE id = ? OR employeeNo = ? OR ('EMP-' || employeeNo) = ? OR ('EMP-' || id) = ? OR phone = ? OR fullName = ? LIMIT 1`,
+        [rawId, rawId, sUserId, sUserId, sPhone || rawId, sFullName || '']
       );
       const tRow = tLookup?.results?.[0]?.response?.result?.rows?.[0];
       if (tRow) {
@@ -705,7 +751,8 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
         [tId, `EMP-${tId}`, tEmpNo, `EMP-${tEmpNo}`, tPhone, tName].filter(Boolean).forEach(id => possibleIds.add(id));
       }
     } catch(e) {}
-
+  } else {
+    // Only expand student aliases for student users!
     try {
       const sLookup = await executeTursoQuery(
         `SELECT id, admissionNo, phone, fullName FROM students 
@@ -732,8 +779,20 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
     const recId = String(call.receiver_id || '').trim();
     const callerId = String(call.caller_id || '').trim();
 
-    const isReceiver = possibleIds.has(recId);
-    const isCaller = possibleIds.has(callerId);
+    let isReceiver = possibleIds.has(recId);
+    if (!isReceiver && call.receiver_name && sFullName && String(call.receiver_name).trim().toLowerCase() === sFullName.toLowerCase()) {
+      isReceiver = true;
+    }
+
+    // Role-aware caller identification (teacher calling student is NEVER a self-call)
+    let isCaller = false;
+    if (isUserTeacher && call.caller_role === 'teacher') {
+      isCaller = possibleIds.has(callerId);
+    } else if (isUserStudent && call.caller_role === 'student') {
+      isCaller = possibleIds.has(callerId);
+    } else if (!userRole) {
+      isCaller = possibleIds.has(callerId) && !isReceiver;
+    }
 
     let ageMs = 0;
     if (call.created_at) {
@@ -780,10 +839,10 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
       const placeholders = idArray.map(() => '?').join(',');
       const res = await executeTursoQuery(
         `SELECT * FROM app_voice_calls 
-         WHERE receiver_id IN (${placeholders})
+         WHERE (receiver_id IN (${placeholders}) OR receiver_name = ?)
            AND status = 'ringing'
          ORDER BY id DESC LIMIT 1`,
-        [...idArray]
+        [...idArray, sFullName || '']
       );
       const rows = res?.results?.[0]?.response?.result?.rows || [];
       if (rows.length > 0) {
@@ -791,7 +850,9 @@ async function pollUserCalls({ userId, userRole, className, admissionNo, phone, 
         const row = {};
         cols.forEach((col, idx) => { row[col] = rows[0][idx]?.value; });
         const callAge = nowMs - new Date(row.created_at || row.updated_at || Date.now()).getTime();
-        if (callAge < 45000 && !possibleIds.has(String(row.caller_id))) {
+        const isSelfCall = (isUserTeacher && row.caller_role === 'teacher' && possibleIds.has(String(row.caller_id))) ||
+                           (isUserStudent && row.caller_role === 'student' && possibleIds.has(String(row.caller_id)));
+        if (callAge < 45000 && !isSelfCall) {
           activeCallsMap.set(row.call_id, row);
           incomingCall = row;
           activeCall = row;
